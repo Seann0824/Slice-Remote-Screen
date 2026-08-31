@@ -54,6 +54,18 @@ pnpm mvp
 http://127.0.0.1:4173/remote/
 ```
 
+## 拾文点对点连接
+
+Mac 端继续运行 `pnpm mvp`，然后打开：
+
+```text
+http://127.0.0.1:4173/remote/?mode=host
+```
+
+在拾文 `/remote` 生成一次性连接码，填到 Mac 页面。拾文服务器只转发 WebRTC offer、answer
+和 ICE，画面与控制数据通过 WebRTC 直接在手机和 Mac 之间传输。这里只使用 STUN 发现公网地址，
+没有 TURN、媒体中转、Docker 或额外服务。
+
 ## 手机局域网访问
 
 直接启动局域网模式；脚本会生成随机 token 并监听 `0.0.0.0`：
@@ -79,16 +91,6 @@ pnpm dev:web
 Vite 地址为 `http://127.0.0.1:5173/remote/`，`/remote/api` 会去掉挂载前缀后代理到
 `4173`。
 
-## 同域挂载
-
-控制台固定以 `/remote/` 为公开路径，可由拾文的 Caddy `handle_path` 转发到这个服务。
-`handle_path` 会在转发前去掉 `/remote`，本地 Host 同时也接受带前缀的直连请求。HTTP API、
-静态资源、manifest 和 WebSocket 都使用同一个前缀，不能只改首页路径。
-
-反向代理必须先验证拾文管理员会话，再使用仅存在于代理和 Host 环境中的 Token 给上游请求
-加 `Authorization: Bearer ...`。Host 的 WebSocket 握手也接受这个代理注入的 Bearer Token；
-浏览器不需要、也不应该拿到它。
-
 ## 验证
 
 ```bash
@@ -113,6 +115,7 @@ packages/design-system    从 Big Minds 筛选抽取的设计系统
 - 已支持点击、双击、拖拽、滚轮、长按右键、文本和基础组合键；尚无可视化组合键编辑器、剪贴板同步和音频；
 - App Profile 与自定义区域保存在 Mac Host 的 Application Support，电脑端配置后手机直接读取；
 - Host 已组装为 ad-hoc 签名 `.app` 以稳定 TCC 身份，但还没有正式 Developer ID 签名、菜单栏生命周期和自动更新；
-- 没有公网信令、TURN、设备密钥和审计日志。
+- 纯 P2P 模式没有 TURN；对称 NAT 或严格企业网络下可能无法建立连接。
 
-下一步不是做 AI。应把 JPEG 帧流替换为 `VideoToolbox H.264 → WebRTC`，加入拥塞控制、关键帧请求和 TURN；JPEG 只能验证低延迟持续采集，带宽和耗电都不适合真正远控。
+下一步应把 Canvas/JPEG 画面源替换为 `VideoToolbox H.264 → WebRTC`，加入拥塞控制和关键帧请求；
+JPEG 只能验证链路，带宽和耗电都不适合长期远控。
