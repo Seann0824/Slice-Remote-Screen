@@ -58,9 +58,11 @@ struct Arguments {
       list-targets [--app APP_NAME]
       list-apps
       launch-app --path APPLICATION_PATH
+      close-app --path APPLICATION_PATH
       app-icon --bundle-id BUNDLE_ID --output FILE [--size 128]
       capture --kind window|display --id ID --output FILE [--max-width 1600]
       stream --kind window|display --id ID [--max-width 1600] [--fps 15]
+      input-stream --kind window|display --id ID
       click --kind window|display --id ID --x 0...1 --y 0...1
       gesture --kind window|display --id ID --payload JSON
       type --kind window|display --id ID --text TEXT

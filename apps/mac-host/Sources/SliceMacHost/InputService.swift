@@ -33,7 +33,11 @@ enum InputService {
             guard let x = request.x, let y = request.y else {
                 throw HostError.invalidArguments("Click gesture requires x and y")
             }
-            try postClick(at: point(target: target, x: x, y: y), button: request.button ?? "left")
+            try postClick(
+                at: point(target: target, x: x, y: y),
+                button: request.button ?? "left",
+                clickCount: min(max(request.clickCount ?? 1, 1), 2)
+            )
         case "drag":
             guard let points = request.points, points.count >= 2 else {
                 throw HostError.invalidArguments("Drag gesture requires at least two points")
@@ -51,6 +55,41 @@ enum InputService {
             try postScroll(at: point(target: target, x: x, y: y), deltaX: deltaX, deltaY: deltaY)
         default:
             throw HostError.invalidArguments("Unsupported pointer gesture: \(request.type)")
+        }
+    }
+
+    static func runInputStream(target: ResolvedTarget) async throws {
+        try await activate(target.processID)
+        var activeButton: String?
+        var lastPoint: CGPoint?
+
+        for try await line in FileHandle.standardInput.bytes.lines {
+            guard !line.isEmpty else { continue }
+            let request = try JSONDecoder().decode(PointerControlRequest.self, from: Data(line.utf8))
+            let point = point(target: target, x: request.x, y: request.y)
+            switch request.type {
+            case "down":
+                let button = request.button ?? "left"
+                if let activeButton, let lastPoint {
+                    try postPointer(type: try mouseTypes(activeButton).up, at: lastPoint, button: activeButton)
+                }
+                try postPointer(type: try mouseTypes(button).down, at: point, button: button)
+                activeButton = button
+            case "move":
+                let eventType = try activeButton.map { try mouseTypes($0).dragged } ?? .mouseMoved
+                try postPointer(type: eventType, at: point, button: activeButton ?? "left")
+            case "up":
+                let button = activeButton ?? request.button ?? "left"
+                try postPointer(type: try mouseTypes(button).up, at: point, button: button)
+                activeButton = nil
+            default:
+                throw HostError.invalidArguments("Unsupported input control: \(request.type)")
+            }
+            lastPoint = point
+        }
+
+        if let activeButton, let lastPoint {
+            try postPointer(type: try mouseTypes(activeButton).up, at: lastPoint, button: activeButton)
         }
     }
 
@@ -79,7 +118,7 @@ enum InputService {
         }
     }
 
-    private static func postClick(at point: CGPoint, button: String) throws {
+    private static func postClick(at point: CGPoint, button: String, clickCount: Int = 1) throws {
         let mouseButton = try mouseButton(button)
         let types = try mouseTypes(button)
         guard let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: mouseButton),
@@ -87,9 +126,19 @@ enum InputService {
               let up = CGEvent(mouseEventSource: nil, mouseType: types.up, mouseCursorPosition: point, mouseButton: mouseButton) else {
             throw HostError.eventCreationFailed
         }
+        down.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
+        up.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
         move.post(tap: .cghidEventTap)
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
+    }
+
+    private static func postPointer(type: CGEventType, at point: CGPoint, button: String) throws {
+        let mouseButton = try mouseButton(button)
+        guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: mouseButton) else {
+            throw HostError.eventCreationFailed
+        }
+        event.post(tap: .cghidEventTap)
     }
 
     private static func postDrag(points: [CGPoint], button: String, durationMs: Int) async throws {

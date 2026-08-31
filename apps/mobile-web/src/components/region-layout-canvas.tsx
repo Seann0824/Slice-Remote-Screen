@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, ty
 import type { CanvasRect, NormalizedRegion, RemoteTarget } from "@slice/protocol";
 import { Button, cn } from "@slice/design-system";
 import { Crop, LocateFixed, Minus, Plus, Trash2 } from "lucide-react";
-import { RemoteCanvas } from "./remote-canvas";
+import { FULL_REGION, RemoteCanvas, type RemoteInputChannel } from "./remote-canvas";
+import { hostApi } from "../api";
 import type { RemoteStream } from "./use-remote-stream";
 
 type Camera = { x: number; y: number; zoom: number };
@@ -47,7 +48,7 @@ function resolveLayouts(regions: NormalizedRegion[]) {
 }
 
 export function RegionLayoutCanvas({
-  target, stream, regions, editing, onCommit, onEditCrop, onRemove, onError,
+  target, stream, regions, editing, onCommit, onEditCrop, onRemove, onError, fullScreen = false,
 }: {
   target: RemoteTarget;
   stream: RemoteStream;
@@ -57,6 +58,7 @@ export function RegionLayoutCanvas({
   onEditCrop: (region: NormalizedRegion) => void;
   onRemove: (regionId: string) => void;
   onError: (message: string) => void;
+  fullScreen?: boolean;
 }) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const layoutGestureRef = useRef<LayoutGesture | null>(null);
@@ -66,6 +68,7 @@ export function RegionLayoutCanvas({
   const [layouts, setLayouts] = useState(layoutsRef.current);
   const [camera, setCamera] = useState(cameraRef.current);
   const [activeRegionId, setActiveRegionId] = useState<string | null>(null);
+  const [inputChannel, setInputChannel] = useState<RemoteInputChannel | null>(null);
 
   useEffect(() => {
     const next = resolveLayouts(regions);
@@ -74,6 +77,15 @@ export function RegionLayoutCanvas({
   }, [regions]);
 
   useEffect(() => { if (!editing) setActiveRegionId(null); }, [editing]);
+
+  useEffect(() => {
+    const channel = hostApi.inputStream(target, onError);
+    setInputChannel(channel);
+    return () => {
+      setInputChannel(null);
+      channel.close();
+    };
+  }, [onError, target]);
 
   const updateLayouts = (next: Record<string, CanvasRect>) => {
     layoutsRef.current = next;
@@ -171,7 +183,11 @@ export function RegionLayoutCanvas({
   return (
     <div
       ref={canvasRef}
-      className={cn("relative h-[min(68dvh,44rem)] min-h-[30rem] touch-none overflow-hidden rounded-sheet bg-inset", editing && "bg-selected")}
+      className={cn(
+        "relative touch-none overflow-hidden bg-inset",
+        fullScreen ? "h-full min-h-0" : "h-[min(68dvh,44rem)] min-h-[30rem] rounded-sheet",
+        editing && "bg-selected",
+      )}
       aria-label="区域布局画布"
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -180,6 +196,9 @@ export function RegionLayoutCanvas({
       onLostPointerCapture={(event) => finishGesture(event, true)}
       onWheel={handleWheel}
     >
+      <div className="pointer-events-none absolute inset-0">
+        <RemoteCanvas target={target} stream={stream} region={FULL_REGION} onError={onError} showStatus={false} fillContainer disabled />
+      </div>
       <div className="absolute inset-0 origin-top-left" style={{ transform: `translate3d(${camera.x}px, ${camera.y}px, 0) scale(${camera.zoom})` }}>
         {regions.map((region, index) => {
           const layout = layouts[region.id];
@@ -200,7 +219,16 @@ export function RegionLayoutCanvas({
                 zIndex: activeRegionId === region.id ? regions.length + 1 : index + 1,
               }}
             >
-              <RemoteCanvas target={target} stream={stream} region={region} onError={onError} showStatus={false} fillContainer disabled={editing} />
+              <RemoteCanvas
+                target={target}
+                stream={stream}
+                region={region}
+                onError={onError}
+                showStatus={false}
+                fillContainer
+                disabled={editing}
+                inputChannel={inputChannel}
+              />
               <p className="pointer-events-none absolute left-2 top-2 max-w-[calc(100%-4rem)] truncate rounded-full bg-overlay/90 px-2 py-1 text-label font-medium text-ink shadow-overlay">{region.name}</p>
               {editing ? (
                 <div className="absolute right-2 top-2 flex gap-1" data-region-action>
@@ -217,12 +245,21 @@ export function RegionLayoutCanvas({
           );
         })}
       </div>
-      <div className="absolute bottom-3 right-3 flex gap-1 rounded-control bg-overlay/95 p-1 shadow-overlay backdrop-blur" data-canvas-control>
+      <div
+        className={cn(
+          "absolute right-3 flex gap-1 rounded-control bg-overlay/95 p-1 shadow-overlay backdrop-blur",
+          fullScreen ? "bottom-[max(6rem,calc(env(safe-area-inset-bottom)+5rem))]" : "bottom-3",
+        )}
+        data-canvas-control
+      >
         <Button size="icon-sm" variant="ghost" aria-label="缩小画布" onClick={() => zoomAround(cameraRef.current.zoom / 1.2)}><Minus /></Button>
         <Button size="icon-sm" variant="ghost" aria-label="重置画布视图" onClick={() => updateCamera({ x: 0, y: 0, zoom: 1 })}><LocateFixed /></Button>
         <Button size="icon-sm" variant="ghost" aria-label="放大画布" onClick={() => zoomAround(cameraRef.current.zoom * 1.2)}><Plus /></Button>
       </div>
-      <p className="pointer-events-none absolute bottom-4 left-4 max-w-[calc(100%-10rem)] rounded-full bg-overlay/90 px-3 py-1.5 text-xs text-muted shadow-overlay">
+      <p className={cn(
+        "pointer-events-none absolute left-4 max-w-[calc(100%-10rem)] rounded-full bg-overlay/90 px-3 py-1.5 text-xs text-muted shadow-overlay",
+        fullScreen ? "bottom-[max(6rem,calc(env(safe-area-inset-bottom)+5rem))]" : "bottom-4",
+      )}>
         空白平移 · 区域内直控 · {Math.round(camera.zoom * 100)}%
       </p>
     </div>

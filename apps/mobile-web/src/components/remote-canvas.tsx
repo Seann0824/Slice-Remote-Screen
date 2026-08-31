@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent, type WheelEvent } from "react";
-import { mapRegionPoint, type NormalizedRegion, type PointerGesture, type RemoteTarget } from "@slice/protocol";
+import { mapRegionPoint, type NormalizedRegion, type PointerControl, type PointerGesture, type RemoteTarget } from "@slice/protocol";
 import { Badge, Skeleton, cn } from "@slice/design-system";
 import { hostApi } from "../api";
 import type { RemoteStream } from "./use-remote-stream";
@@ -21,7 +21,10 @@ type RemoteCanvasProps = {
   fillViewport?: boolean;
   fillContainer?: boolean;
   disabled?: boolean;
+  inputChannel?: RemoteInputChannel | null;
 };
+
+export type RemoteInputChannel = ReturnType<typeof hostApi.inputStream>;
 
 type SelectionHandle = "nw" | "ne" | "sw" | "se";
 type SelectionGesture = {
@@ -39,6 +42,7 @@ type RemoteGesture = {
   points: { x: number; y: number }[];
   moved: boolean;
   longPressed: boolean;
+  realtimeStarted: boolean;
 };
 
 function pointInSurface(event: PointerEvent<HTMLDivElement>) {
@@ -92,6 +96,7 @@ export function RemoteCanvas({
   fillViewport = false,
   fillContainer = false,
   disabled = false,
+  inputChannel,
 }: RemoteCanvasProps) {
   const [isActing, setIsActing] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -101,16 +106,37 @@ export function RemoteCanvas({
   const longPressTimer = useRef<number | null>(null);
   const wheelTimer = useRef<number | null>(null);
   const wheelGesture = useRef<{ x: number; y: number; deltaX: number; deltaY: number } | null>(null);
+  const inputStreamRef = useRef<ReturnType<typeof hostApi.inputStream> | null>(null);
+  const realtimeMoveRef = useRef<PointerControl | null>(null);
+  const realtimeFrameRef = useRef<number | null>(null);
+  const lastTapRef = useRef<{ at: number; x: number; y: number; button: "left" | "right" | "middle" } | null>(null);
   const touchPoints = useRef(new Map<number, { clientX: number; clientY: number }>());
   const touchScroll = useRef<{ lastX: number; lastY: number; x: number; y: number; deltaX: number; deltaY: number } | null>(null);
-  const actingRef = useRef(false);
+  const gestureQueueRef = useRef(Promise.resolve());
+  const pendingGesturesRef = useRef(0);
 
   useEffect(() => { activeSelection.current = selection; }, [selection]);
 
   useEffect(() => () => {
     if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
     if (wheelTimer.current !== null) window.clearTimeout(wheelTimer.current);
+    if (realtimeFrameRef.current !== null) window.cancelAnimationFrame(realtimeFrameRef.current);
   }, []);
+
+  useEffect(() => {
+    if (inputChannel !== undefined || selectionMode || disabled) return;
+    const channel = hostApi.inputStream(target, onError);
+    inputStreamRef.current = channel;
+    return () => {
+      channel.close();
+      if (inputStreamRef.current === channel) inputStreamRef.current = null;
+      if (realtimeFrameRef.current !== null) {
+        window.cancelAnimationFrame(realtimeFrameRef.current);
+        realtimeFrameRef.current = null;
+      }
+      realtimeMoveRef.current = null;
+    };
+  }, [disabled, inputChannel, onError, selectionMode, target]);
 
   useEffect(() => {
     const draw = () => {
@@ -139,18 +165,42 @@ export function RemoteCanvas({
     return mapRegionPoint(region, localX, localY);
   };
 
-  const performGesture = async (gesture: PointerGesture) => {
-    if (actingRef.current) return;
-    actingRef.current = true;
+  const performGesture = (gesture: PointerGesture) => {
+    pendingGesturesRef.current += 1;
     setIsActing(true);
-    try {
-      await hostApi.gesture(target, gesture);
-    } catch (error) {
-      onError(error instanceof Error ? error.message : String(error));
-    } finally {
-      actingRef.current = false;
-      setIsActing(false);
+    const task = gestureQueueRef.current
+      .catch(() => undefined)
+      .then(() => hostApi.gesture(target, gesture))
+      .catch((error) => onError(error instanceof Error ? error.message : String(error)))
+      .finally(() => {
+        pendingGesturesRef.current -= 1;
+        if (pendingGesturesRef.current === 0) setIsActing(false);
+      });
+    gestureQueueRef.current = task.then(() => undefined);
+    return task;
+  };
+
+  const currentInputChannel = () => inputChannel ?? inputStreamRef.current;
+
+  const flushRealtimeMove = () => {
+    const move = realtimeMoveRef.current;
+    realtimeMoveRef.current = null;
+    if (realtimeFrameRef.current !== null) {
+      window.cancelAnimationFrame(realtimeFrameRef.current);
+      realtimeFrameRef.current = null;
     }
+    if (move) currentInputChannel()?.send(move);
+  };
+
+  const queueRealtimeMove = (point: { x: number; y: number }) => {
+    realtimeMoveRef.current = { type: "move", ...point };
+    if (realtimeFrameRef.current !== null) return;
+    realtimeFrameRef.current = window.requestAnimationFrame(() => {
+      realtimeFrameRef.current = null;
+      const move = realtimeMoveRef.current;
+      realtimeMoveRef.current = null;
+      if (move) currentInputChannel()?.send(move);
+    });
   };
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
@@ -180,6 +230,12 @@ export function RemoteCanvas({
       touchPoints.current.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
       if (touchPoints.current.size === 2) {
         if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
+        const gesture = remoteGesture.current;
+        if (gesture?.realtimeStarted) {
+          flushRealtimeMove();
+          const last = gesture.points.at(-1);
+          if (last) currentInputChannel()?.send({ type: "up", ...last });
+        }
         remoteGesture.current = null;
         const values = [...touchPoints.current.values()];
         const centerX = (values[0]!.clientX + values[1]!.clientX) / 2;
@@ -202,14 +258,18 @@ export function RemoteCanvas({
       points: [point],
       moved: false,
       longPressed: false,
+      realtimeStarted: event.pointerType !== "touch" && Boolean(currentInputChannel()),
     };
+    if (remoteGesture.current.realtimeStarted) {
+      currentInputChannel()?.send({ type: "down", button, ...point });
+    }
     if (event.pointerType === "touch" && button === "left") {
       longPressTimer.current = window.setTimeout(() => {
         const gesture = remoteGesture.current;
         if (!gesture || gesture.moved) return;
         gesture.longPressed = true;
         const last = gesture.points.at(-1)!;
-        void performGesture({ type: "click", button: "right", ...last });
+        void performGesture({ type: "click", button: "right", clickCount: 1, ...last });
       }, 520);
     }
   };
@@ -238,9 +298,18 @@ export function RemoteCanvas({
       if (Math.hypot(event.clientX - gesture.startClientX, event.clientY - gesture.startClientY) > 7) {
         gesture.moved = true;
         if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
+        const input = currentInputChannel();
+        if (!gesture.realtimeStarted && !gesture.longPressed && input) {
+          const first = gesture.points[0];
+          if (first) input.send({ type: "down", button: gesture.button, ...first });
+          gesture.realtimeStarted = true;
+        }
       }
       const previous = gesture.points.at(-1)!;
-      if (Math.hypot(point.x - previous.x, point.y - previous.y) > 0.008) gesture.points.push(point);
+      if (Math.hypot(point.x - previous.x, point.y - previous.y) > 0.008) {
+        gesture.points.push(point);
+        if (gesture.realtimeStarted) queueRealtimeMove(point);
+      }
       return;
     }
     const gesture = selectionGesture.current;
@@ -290,8 +359,21 @@ export function RemoteCanvas({
       const gesture = remoteGesture.current;
       if (!gesture || gesture.pointerId !== event.pointerId) return;
       remoteGesture.current = null;
-      if (gesture.longPressed) return;
       const finalPoint = canvasPoint(event.clientX, event.clientY);
+      if (gesture.realtimeStarted) {
+        if (finalPoint) {
+          const previous = gesture.points.at(-1);
+          if (!previous || Math.hypot(finalPoint.x - previous.x, finalPoint.y - previous.y) > 0.001) {
+            gesture.points.push(finalPoint);
+            queueRealtimeMove(finalPoint);
+          }
+        }
+        flushRealtimeMove();
+        const last = finalPoint ?? gesture.points.at(-1);
+        if (last) currentInputChannel()?.send({ type: "up", ...last });
+        return;
+      }
+      if (gesture.longPressed) return;
       if (finalPoint && gesture.moved) {
         if (Math.hypot(finalPoint.x - gesture.points.at(-1)!.x, finalPoint.y - gesture.points.at(-1)!.y) > 0.001) {
           gesture.points.push(finalPoint);
@@ -303,7 +385,24 @@ export function RemoteCanvas({
           durationMs: Math.min(5_000, Math.max(40, Math.round(event.timeStamp - gesture.startedAt))),
         });
       } else if (finalPoint) {
-        void performGesture({ type: "click", button: gesture.button, ...finalPoint });
+        const lastTap = lastTapRef.current;
+        const isDoubleTap = event.pointerType === "touch"
+          && gesture.button === "left"
+          && lastTap?.button === gesture.button
+          && event.timeStamp - lastTap.at <= 360
+          && Math.hypot(finalPoint.x - lastTap.x, finalPoint.y - lastTap.y) <= 0.05;
+        lastTapRef.current = isDoubleTap ? null : {
+          at: event.timeStamp,
+          x: finalPoint.x,
+          y: finalPoint.y,
+          button: gesture.button,
+        };
+        void performGesture({
+          type: "click",
+          button: gesture.button,
+          clickCount: isDoubleTap ? 2 : 1,
+          ...finalPoint,
+        });
       }
       return;
     }
@@ -322,6 +421,12 @@ export function RemoteCanvas({
   const handlePointerCancel = () => {
     if (!selectionMode) {
       if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
+      const gesture = remoteGesture.current;
+      if (gesture?.realtimeStarted) {
+        flushRealtimeMove();
+        const last = gesture.points.at(-1);
+        if (last) currentInputChannel()?.send({ type: "up", ...last });
+      }
       remoteGesture.current = null;
       touchPoints.current.clear();
       touchScroll.current = null;
@@ -414,7 +519,7 @@ export function RemoteCanvas({
             </div>
           ) : null}
         </div>
-        {isActing ? <div className="absolute inset-0 bg-ink/10" aria-hidden="true" /> : null}
+        {isActing ? <div className="pointer-events-none absolute inset-0 bg-ink/10" aria-hidden="true" /> : null}
         {showStatus ? (
           <Badge className="absolute right-2 top-2" variant={stream.state === "streaming" ? "default" : "secondary"}>
             {stream.state === "streaming" ? "实时" : stream.state === "reconnecting" ? "重连" : "连接"}

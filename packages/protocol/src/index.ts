@@ -79,6 +79,7 @@ export const pointerGestureSchema = z.discriminatedUnion("type", [
   pointerPointSchema.extend({
     type: z.literal("click"),
     button: z.enum(["left", "right", "middle"]).default("left"),
+    clickCount: z.number().int().min(1).max(2).default(1),
   }),
   z.object({
     type: z.literal("drag"),
@@ -94,6 +95,18 @@ export const pointerGestureSchema = z.discriminatedUnion("type", [
 ]);
 export type PointerGesture = z.infer<typeof pointerGestureSchema>;
 
+const pointerButtonSchema = z.enum(["left", "right", "middle"]);
+const pointerControlPointSchema = z.object({
+  x: z.number().min(0).max(1),
+  y: z.number().min(0).max(1),
+});
+export const pointerControlSchema = z.discriminatedUnion("type", [
+  pointerControlPointSchema.extend({ type: z.literal("down"), button: pointerButtonSchema.default("left") }),
+  pointerControlPointSchema.extend({ type: z.literal("move") }),
+  pointerControlPointSchema.extend({ type: z.literal("up") }),
+]);
+export type PointerControl = z.infer<typeof pointerControlSchema>;
+
 export const installedAppSchema = z.object({
   appKey: z.string().min(1),
   appName: z.string().min(1),
@@ -105,6 +118,10 @@ export const installedAppSchema = z.object({
 export type InstalledApp = z.infer<typeof installedAppSchema>;
 
 export const launchAppRequestSchema = z.object({
+  path: z.string().min(1).max(4_096),
+});
+
+export const closeAppRequestSchema = z.object({
   path: z.string().min(1).max(4_096),
 });
 

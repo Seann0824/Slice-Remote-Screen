@@ -59,6 +59,10 @@ export class NativeHost {
     await this.run(["launch-app", "--path", path], 30_000);
   }
 
+  async closeApp(path: string) {
+    await this.run(["close-app", "--path", path], 30_000);
+  }
+
   async appIcon(bundleIdentifier: string) {
     const directory = await mkdtemp(join(tmpdir(), "slice-app-icon-"));
     const output = join(directory, "icon.png");
@@ -136,5 +140,13 @@ export class NativeHost {
     );
     child.stdin.end();
     return child;
+  }
+
+  inputStream(kind: TargetKind, id: number) {
+    return spawn(
+      this.binaryPath,
+      ["input-stream", "--kind", kind, "--id", String(id)],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    ) as ReturnType<NativeHost["stream"]>;
   }
 }

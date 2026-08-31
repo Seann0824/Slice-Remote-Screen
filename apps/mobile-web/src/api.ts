@@ -1,5 +1,6 @@
 import {
   appProfileSchema,
+  closeAppRequestSchema,
   installedAppSchema,
   permissionsSchema,
   remoteTargetSchema,
@@ -7,6 +8,7 @@ import {
   type AppProfile,
   type InstalledApp,
   type KeyRequest,
+  type PointerControl,
   type PointerGesture,
   type RemoteTarget,
 } from "@slice/protocol";
@@ -54,6 +56,10 @@ export const hostApi = {
   },
   async launchApp(path: string) {
     await request("/api/apps/launch", { method: "POST", body: JSON.stringify({ path }) });
+  },
+  async closeApp(path: string) {
+    closeAppRequestSchema.parse({ path });
+    await request("/api/apps/close", { method: "POST", body: JSON.stringify({ path }) });
   },
   async appIcon(bundleIdentifier: string) {
     return (await request(`/api/apps/icon?bundleIdentifier=${encodeURIComponent(bundleIdentifier)}`)).blob();
@@ -126,6 +132,54 @@ export const hostApi = {
       stopped = true;
       if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
       socket?.close();
+    };
+  },
+  inputStream(target: RemoteTarget, onError: (message: string) => void) {
+    let socket: WebSocket | null = null;
+    let stopped = false;
+    let ready = false;
+    const queue: PointerControl[] = [];
+
+    const send = (control: PointerControl) => {
+      if (ready && socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(control));
+      } else if (!stopped) {
+        queue.push(control);
+      }
+    };
+
+    socket = new WebSocket(`${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/api/stream`);
+    socket.addEventListener("open", () => {
+      socket?.send(JSON.stringify({ token, kind: target.kind, id: target.id, mode: "input" }));
+    });
+    socket.addEventListener("message", (event) => {
+      try {
+        const message = JSON.parse(String(event.data)) as { type?: string; message?: string };
+        if (message.type === "ready") {
+          ready = true;
+          for (const control of queue.splice(0)) send(control);
+        } else if (message.type === "error") {
+          onError(message.message || "实时输入通道异常");
+        }
+      } catch {
+        onError("实时输入通道返回了无效消息");
+      }
+    });
+    socket.addEventListener("error", () => {
+      if (!stopped) onError("无法连接实时输入通道");
+    });
+    socket.addEventListener("close", (event) => {
+      if (!stopped && event.code !== 1000) onError("实时输入通道已断开");
+    });
+
+    return {
+      send,
+      close() {
+        stopped = true;
+        ready = false;
+        queue.length = 0;
+        socket?.close();
+      },
     };
   },
   async click(target: RemoteTarget, x: number, y: number) {

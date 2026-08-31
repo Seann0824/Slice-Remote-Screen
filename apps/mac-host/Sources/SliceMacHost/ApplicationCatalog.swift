@@ -55,4 +55,22 @@ enum ApplicationCatalog {
             configuration: NSWorkspace.OpenConfiguration()
         )
     }
+
+    @MainActor
+    static func close(path: String) throws {
+        guard let application = list().first(where: { $0.path == URL(fileURLWithPath: path).standardizedFileURL.path }) else {
+            throw HostError.applicationNotFound(path)
+        }
+        guard let runningApplication = NSWorkspace.shared.runningApplications.first(where: { running in
+            if let bundleIdentifier = application.bundleIdentifier {
+                return running.bundleIdentifier == bundleIdentifier
+            }
+            return running.bundleURL?.standardizedFileURL.path == application.path
+        }) else {
+            return
+        }
+        guard runningApplication.terminate() else {
+            throw HostError.applicationCloseFailed(application.appName)
+        }
+    }
 }

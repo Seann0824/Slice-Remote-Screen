@@ -45,12 +45,20 @@ struct PointerPoint: Codable, Sendable {
 struct PointerGestureRequest: Codable, Sendable {
     let type: String
     let button: String?
+    let clickCount: Int?
     let x: Double?
     let y: Double?
     let points: [PointerPoint]?
     let durationMs: Int?
     let deltaX: Double?
     let deltaY: Double?
+}
+
+struct PointerControlRequest: Codable, Sendable {
+    let type: String
+    let button: String?
+    let x: Double
+    let y: Double
 }
 
 enum HostError: LocalizedError {
@@ -60,6 +68,7 @@ enum HostError: LocalizedError {
     case eventCreationFailed
     case unsupportedKey(String)
     case applicationNotFound(String)
+    case applicationCloseFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -69,6 +78,7 @@ enum HostError: LocalizedError {
         case .eventCreationFailed: "Could not create an input event"
         case .unsupportedKey(let key): "Unsupported key: \(key)"
         case .applicationNotFound(let bundleIdentifier): "Application not found: \(bundleIdentifier)"
+        case .applicationCloseFailed(let appName): "Could not close application: \(appName)"
         }
     }
 }

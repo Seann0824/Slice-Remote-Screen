@@ -4,10 +4,12 @@ import { networkInterfaces } from "node:os";
 import { extname, normalize, resolve, sep } from "node:path";
 import {
   appProfileSchema,
+  closeAppRequestSchema,
   clickRequestSchema,
   keyRequestSchema,
   launchAppRequestSchema,
   pointerGestureSchema,
+  pointerControlSchema,
   targetKindSchema,
   typeRequestSchema,
 } from "@slice/protocol";
@@ -90,6 +92,12 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, url
   if (url.pathname === "/api/apps/launch" && request.method === "POST") {
     const body = launchAppRequestSchema.parse(await readJson(request));
     await nativeHost.launchApp(body.path);
+    sendJson(response, 200, { ok: true });
+    return;
+  }
+  if (url.pathname === "/api/apps/close" && request.method === "POST") {
+    const body = closeAppRequestSchema.parse(await readJson(request));
+    await nativeHost.closeApp(body.path);
     sendJson(response, 200, { ok: true });
     return;
   }
@@ -235,6 +243,7 @@ const streamRequestSchema = z.object({
   token: z.string().nullable(),
   kind: targetKindSchema,
   id: z.number().int().nonnegative(),
+  mode: z.enum(["frames", "input"]).default("frames"),
 });
 const webSocketServer = new WebSocketServer({ noServer: true });
 
@@ -265,6 +274,38 @@ webSocketServer.on("connection", (webSocket) => {
       }
 
       clearTimeout(authenticationTimeout);
+      if (request.mode === "input") {
+        nativeProcess = nativeHost.inputStream(request.kind, request.id);
+        let standardError = "";
+        nativeProcess.stderr.on("data", (chunk: Buffer) => {
+          standardError = (standardError + chunk.toString("utf8")).slice(-4_096);
+        });
+        nativeProcess.on("error", (error) => {
+          if (webSocket.readyState === WebSocket.OPEN) {
+            webSocket.send(JSON.stringify({ type: "error", message: error.message }));
+            webSocket.close(1011, "Native input failed");
+          }
+        });
+        nativeProcess.on("exit", (code, signal) => {
+          if (webSocket.readyState !== WebSocket.OPEN) return;
+          const message = standardError.trim() || `Native input exited (${code ?? signal ?? "unknown"})`;
+          webSocket.send(JSON.stringify({ type: "error", message }));
+          webSocket.close(1011, "Native input stopped");
+        });
+        webSocket.on("message", (inputMessage, inputIsBinary) => {
+          if (inputIsBinary || !nativeProcess?.stdin.writable) return;
+          try {
+            const control = pointerControlSchema.parse(JSON.parse(inputMessage.toString()));
+            nativeProcess.stdin.write(`${JSON.stringify(control)}\n`);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            webSocket.send(JSON.stringify({ type: "error", message }));
+            webSocket.close(4400, "Invalid input event");
+          }
+        });
+        webSocket.send(JSON.stringify({ type: "ready" }));
+        return;
+      }
       const parser = new LengthPrefixedFrameParser();
       nativeProcess = nativeHost.stream(request.kind, request.id);
       let standardError = "";

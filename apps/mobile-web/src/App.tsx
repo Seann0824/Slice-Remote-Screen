@@ -1,43 +1,29 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { AppProfile, HostPermissions, InstalledApp, NormalizedRegion, RemoteTarget } from "@slice/protocol";
 import {
   Alert,
   AlertDescription,
   AlertTitle,
-  Badge,
   Button,
   Card,
-  CardContent,
   CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
   cn,
-  Field,
-  FieldDescription,
-  FieldGroup,
-  FieldLabel,
   Input,
-  useTheme,
 } from "@slice/design-system";
 import {
-  AppWindow,
   Check,
-  ChevronLeft,
   CircleAlert,
   Grid2X2,
-  Laptop,
-  Maximize2,
   Monitor,
-  Moon,
   PanelsTopLeft,
   Plus,
-  RefreshCw,
   Scan,
-  Sun,
 } from "lucide-react";
 import { hostApi } from "./api";
 import { AppHoneycomb } from "./components/app-honeycomb";
+import { AppIcon } from "./components/app-icon";
 import { RegionLayoutCanvas } from "./components/region-layout-canvas";
 import { FULL_REGION, RemoteCanvas } from "./components/remote-canvas";
 import { useRemoteStream } from "./components/use-remote-stream";
@@ -81,20 +67,62 @@ function sortApplications(apps: InstalledApp[]) {
   });
 }
 
-function useCanEditProfiles() {
-  const [canEdit, setCanEdit] = useState(false);
-  useEffect(() => {
-    const query = window.matchMedia("(min-width: 768px) and (pointer: fine)");
-    const update = () => setCanEdit(query.matches);
-    update();
-    query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
-  }, []);
-  return canEdit;
+function DockAction({
+  label,
+  onClick,
+  children,
+  className,
+}: {
+  label: string;
+  onClick?: () => void;
+  children: ReactNode;
+  className?: string;
+}) {
+  const content = (
+    <>
+      {children}
+      <span className="pointer-events-none absolute -top-10 left-1/2 hidden -translate-x-1/2 whitespace-nowrap rounded-control bg-black/85 px-2 py-1 text-[0.6875rem] text-white shadow-lg group-hover:block">
+        {label}
+      </span>
+    </>
+  );
+  const actionClassName = cn(
+    "group relative flex size-12 shrink-0 items-center justify-center rounded-[1rem] border border-white/10 bg-white/10 text-white shadow-lg transition duration-150 ease-product hover:-translate-y-1 hover:bg-white/20 focus-visible:outline-white active:scale-95",
+    !onClick && "cursor-default hover:translate-y-0 hover:bg-white/10",
+    className,
+  );
+  return onClick ? (
+    <button className={actionClassName} type="button" aria-label={label} title={label} onClick={onClick}>
+      {content}
+    </button>
+  ) : (
+    <div className={actionClassName} aria-label={label} title={label} role="img">
+      {content}
+    </div>
+  );
+}
+
+function DockSeparator() {
+  return <span className="mx-1 h-9 w-px shrink-0 bg-white/20" aria-hidden="true" />;
+}
+
+function FullscreenDock({ children }: { children: ReactNode }) {
+  return (
+    <div className="pointer-events-none absolute inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[9999] flex flex-col items-center">
+      <p className="mb-2 rounded-full bg-black/65 px-3 py-1.5 text-center text-xs text-white/65 shadow-lg backdrop-blur-xl">
+        单击 · 双击 · 单指拖动 · 长按右键 · 双指滚动
+      </p>
+      <nav
+        className="pointer-events-auto flex max-w-full items-end gap-1 overflow-visible rounded-[1.75rem] border border-white/15 bg-black/65 px-2.5 py-2.5 shadow-[0_16px_50px_rgb(0_0_0/35%)] backdrop-blur-2xl"
+        aria-label="全屏控制"
+      >
+        {children}
+      </nav>
+    </div>
+  );
 }
 
 export default function App() {
-  const { resolvedTheme, setPreference } = useTheme();
   const [permissions, setPermissions] = useState<HostPermissions | null>(null);
   const [targets, setTargets] = useState<RemoteTarget[]>([]);
   const [installedApps, setInstalledApps] = useState<InstalledApp[]>([]);
@@ -109,7 +137,6 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [savingProfile, setSavingProfile] = useState(false);
-  const canEditProfiles = useCanEditProfiles();
   const handleRemoteError = useCallback((message: string) => setError(message), []);
 
   const applicationTargets = useMemo(() => pickApplicationTargets(targets), [targets]);
@@ -123,6 +150,8 @@ export default function App() {
   ), [applicationTargets, selectedAppId]);
   const activeTarget = viewMode === "desktop" ? displayTarget : viewMode === "apps" ? null : selectedApp;
   const immersive = viewMode === "app" || viewMode === "desktop";
+  const appCanvas = viewMode === "apps";
+  const canvasView = appCanvas || viewMode === "regions" || immersive;
   const stream = useRemoteStream(activeTarget, handleRemoteError);
 
   const load = useCallback(async () => {
@@ -203,6 +232,17 @@ export default function App() {
     }
   };
 
+  const closeApplication = async (app: InstalledApp) => {
+    try {
+      await hostApi.closeApp(app.path);
+      await new Promise((resolve) => window.setTimeout(resolve, 300));
+      await load();
+      setError(null);
+    } catch (closeError) {
+      setError(closeError instanceof Error ? closeError.message : String(closeError));
+    }
+  };
+
   const beginRegion = () => {
     setLayoutEditing(false);
     setEditingRegionId(null);
@@ -252,46 +292,24 @@ export default function App() {
     await persistRegions(profile.regions.filter((region) => region.id !== regionId));
   };
 
-  const toggleFullscreen = async () => {
-    try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else await document.documentElement.requestFullscreen();
-    } catch {
-      setError("当前浏览器不允许网页全屏；把页面添加到手机主屏幕后打开即可全屏运行。");
-    }
-  };
-
   return (
     <main className={cn(
-      immersive ? "h-dvh w-full overflow-hidden bg-ink" : "mx-auto flex min-h-dvh w-full max-w-3xl flex-col gap-5 px-4 pb-28 pt-[max(1.25rem,env(safe-area-inset-top))] sm:px-6",
+      canvasView
+        ? "h-dvh w-full overflow-hidden bg-inset"
+        : "mx-auto flex min-h-dvh w-full max-w-3xl flex-col gap-5 px-4 pb-8 pt-[max(1.25rem,env(safe-area-inset-top))] sm:px-6",
     )}>
-      {!immersive ? <header className="flex items-center justify-between gap-4">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="flex size-11 shrink-0 items-center justify-center rounded-control bg-primary text-primary-foreground">
-            <Laptop aria-hidden="true" />
-          </div>
-          <div className="min-w-0">
-            <p className="font-utility text-meta uppercase tracking-eyebrow text-muted">Local MVP</p>
-            <h1 className="truncate font-display text-title-sm tracking-display">Slice Remote Screen</h1>
-          </div>
-        </div>
-        <div className="flex items-center gap-1">
-          <Badge variant={error ? "destructive" : "secondary"}>{error ? "异常" : "在线"}</Badge>
-          <Button size="icon-sm" variant="ghost" aria-label="刷新应用列表" onClick={() => void load()} disabled={loading}>
-            <RefreshCw className={loading ? "animate-spin" : undefined} />
-          </Button>
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            aria-label={resolvedTheme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
-            onClick={() => setPreference(resolvedTheme === "dark" ? "light" : "dark")}
-          >
-            {resolvedTheme === "dark" ? <Sun /> : <Moon />}
-          </Button>
-        </div>
-      </header> : null}
+      {canvasView && permissions && (!permissions.screenRecording || !permissions.accessibility) ? (
+        <Alert className="absolute inset-x-4 top-[max(5rem,env(safe-area-inset-top))] z-30 mx-auto max-w-md shadow-overlay" variant="destructive">
+          <CircleAlert />
+          <AlertTitle>系统权限未完成</AlertTitle>
+          <AlertDescription>
+            屏幕录制：{permissions.screenRecording ? "已授权" : "未授权"}；辅助功能：{permissions.accessibility ? "已授权" : "未授权"}。
+            <Button className="mt-3" size="sm" variant="danger" onClick={() => void requestPermissions()}>申请权限</Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
-      {!immersive && permissions && (!permissions.screenRecording || !permissions.accessibility) ? (
+      {!canvasView && permissions && (!permissions.screenRecording || !permissions.accessibility) ? (
         <Alert variant="destructive">
           <CircleAlert />
           <AlertTitle>系统权限未完成</AlertTitle>
@@ -302,7 +320,15 @@ export default function App() {
         </Alert>
       ) : null}
 
-      {!immersive && error ? (
+      {canvasView && error ? (
+        <Alert className="absolute inset-x-4 top-[max(5rem,env(safe-area-inset-top))] z-30 mx-auto max-w-md shadow-overlay" variant="destructive">
+          <CircleAlert />
+          <AlertTitle>操作失败</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      {!canvasView && error ? (
         <Alert variant="destructive">
           <CircleAlert />
           <AlertTitle>操作失败</AlertTitle>
@@ -310,30 +336,20 @@ export default function App() {
         </Alert>
       ) : null}
 
-      {!immersive && viewMode !== "apps" && selectedApp ? (
-        <section className="flex items-center justify-between gap-3 rounded-card bg-inset px-4 py-3" aria-label="当前应用">
-          <div className="min-w-0">
-            <p className="text-xs text-muted">{canEditProfiles ? "电脑配置模式" : "当前只共享这个应用"}</p>
-            <p className="truncate font-semibold">{selectedApp.appName || selectedApp.title}</p>
-          </div>
-          <div className="flex items-center gap-2">
-            {canEditProfiles ? <Badge variant="outline">配置保存到 Mac</Badge> : null}
-            <Button size="sm" variant="ghost" onClick={() => setViewMode("apps")}>更换应用</Button>
-          </div>
-        </section>
-      ) : null}
-
       {viewMode === "apps" ? (
-        <section className="flex flex-col gap-4" aria-labelledby="apps-heading">
-          <div>
-            <p className="font-utility text-meta uppercase tracking-eyebrow text-muted">第一层 · 应用</p>
-            <h2 id="apps-heading" className="mt-1 text-lg font-semibold">{canEditProfiles ? "选择要配置的应用" : "选择手机上要看的应用"}</h2>
-            <p className="mt-1 text-body-sm text-muted">应用配置保存在 Mac；手机和电脑都可以继续调整取景与区域布局。</p>
-          </div>
+        <section className="h-full" aria-labelledby="apps-heading">
+          <h1 id="apps-heading" className="sr-only">选择应用</h1>
           {applicationCatalog.length ? (
-            <AppHoneycomb apps={applicationCatalog} onSelect={selectApplication} />
+            <AppHoneycomb
+              apps={applicationCatalog}
+              onSelect={selectApplication}
+              onCloseApp={closeApplication}
+              onOpenDesktop={() => setViewMode("desktop")}
+              displayAvailable={Boolean(displayTarget)}
+              fullScreen
+            />
           ) : (
-            <Card variant="outlined">
+            <Card className="mx-4 mt-4" variant="outlined">
               <CardHeader>
                 <CardTitle>{loading ? "正在读取已安装应用…" : "没有找到已安装应用"}</CardTitle>
                 <CardDescription>应用目录读取失败；这和窗口是否打开不是一回事。</CardDescription>
@@ -343,114 +359,86 @@ export default function App() {
         </section>
       ) : null}
 
-      {viewMode === "regions" && selectedApp && profile ? (
-        <section className="flex flex-col gap-4" aria-labelledby="regions-heading">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="font-utility text-meta uppercase tracking-eyebrow text-muted">第二层 · 交互区域</p>
-              <h2 id="regions-heading" className="mt-1 text-lg font-semibold">手机交互区域</h2>
-              <p className="mt-1 text-body-sm text-muted">取景决定截取 App 的哪里；布局决定它在手机画布上的位置和大小。</p>
-            </div>
-            {!editing ? <div className="flex flex-wrap justify-end gap-2">
-              {profile.regions.length ? (
-                <Button
-                  size="sm"
-                  variant={layoutEditing ? "primary" : "secondary"}
-                  onClick={() => setLayoutEditing((value) => !value)}
-                >
-                  {layoutEditing ? <Check data-icon="inline-start" /> : <PanelsTopLeft data-icon="inline-start" />}
-                  {layoutEditing ? "完成布局" : "编辑布局"}
-                </Button>
-              ) : null}
-              <Button size="sm" onClick={beginRegion}><Plus data-icon="inline-start" />添加区域</Button>
-            </div> : null}
-          </div>
+      {viewMode === "regions" && selectedApp ? (
+        <section className="fixed inset-0 overflow-hidden bg-ink" aria-labelledby="regions-heading">
+          <h2 id="regions-heading" className="sr-only">{selectedApp.appName || selectedApp.title}区域画布</h2>
+          {profile ? (
+            editing ? (
+              <RemoteCanvas
+                target={selectedApp}
+                stream={stream}
+                onError={handleRemoteError}
+                selectionMode
+                selection={draftRegion}
+                onSelectionChange={setDraftRegion}
+                onSelectionComplete={() => setDraftName((value) => value || `区域 ${profile.regions.length + 1}`)}
+                fillViewport
+              />
+            ) : (
+              <RegionLayoutCanvas
+                target={selectedApp}
+                stream={stream}
+                regions={profile.regions}
+                editing={layoutEditing}
+                onCommit={(regions) => void persistRegions(regions)}
+                onEditCrop={editRegion}
+                onRemove={(regionId) => void removeRegion(regionId)}
+                onError={handleRemoteError}
+                fullScreen
+              />
+            )
+          ) : (
+            <div className="flex h-full items-center justify-center text-body-sm text-white/65">正在读取区域配置…</div>
+          )}
 
           {editing ? (
-            <Card variant="elevated">
-              <CardHeader>
-                <CardTitle>{editingRegionId ? `调整${draftName}取景` : "在完整 App 上选择区域"}</CardTitle>
-                <CardDescription>拖动区域本身改变位置，拖动四个角改变大小；在空白处拖动会重新框选。</CardDescription>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-4">
-                <RemoteCanvas
-                  target={selectedApp}
-                  stream={stream}
-                  onError={handleRemoteError}
-                  selectionMode
-                  selection={draftRegion}
-                  onSelectionChange={setDraftRegion}
-                  onSelectionComplete={() => setDraftName((value) => value || `区域 ${profile.regions.length + 1}`)}
-                />
-                <FieldGroup>
-                  <Field>
-                    <FieldLabel htmlFor="region-name">区域名称</FieldLabel>
-                    <Input
-                      id="region-name"
-                      value={draftName}
-                      placeholder="例如：对话输入区"
-                      onChange={(event) => setDraftName(event.target.value)}
-                    />
-                    <FieldDescription>名称只用于手机端识别，不会触发自动化动作。</FieldDescription>
-                  </Field>
-                </FieldGroup>
-              </CardContent>
-              <CardFooter className="gap-2">
-                <Button variant="primary" disabled={!draftRegion || !draftName.trim() || savingProfile} onClick={saveRegion}>
-                  {editingRegionId ? "保存取景调整" : "保存区域"}
-                </Button>
-                <Button variant="ghost" onClick={() => { setEditing(false); setEditingRegionId(null); setDraftRegion(null); }}>取消</Button>
-              </CardFooter>
-            </Card>
+            <div className="absolute inset-x-3 bottom-[max(6rem,calc(env(safe-area-inset-bottom)+5rem))] z-[9999] mx-auto flex w-[calc(100%-1.5rem)] max-w-lg items-center gap-2 rounded-sheet border border-white/15 bg-black/70 p-2 shadow-overlay backdrop-blur-xl">
+              <Input
+                id="region-name"
+                className="min-w-0 flex-1 border-0 bg-transparent text-white placeholder:text-white/45 hover:bg-white/10 focus:bg-white/10 focus:ring-0"
+                value={draftName}
+                placeholder="区域名称"
+                aria-label="区域名称"
+                onChange={(event) => setDraftName(event.target.value)}
+              />
+              <Button variant="primary" disabled={!draftRegion || !draftName.trim() || savingProfile} onClick={saveRegion}>
+                {editingRegionId ? "保存" : "添加"}
+              </Button>
+              <Button className="text-white hover:bg-white/15" variant="ghost" onClick={() => { setEditing(false); setEditingRegionId(null); setDraftRegion(null); }}>
+                取消
+              </Button>
+            </div>
           ) : null}
 
-          {!editing && profile.regions.length === 0 ? (
-            <Card variant="outlined">
-              <CardHeader>
-                <CardTitle>还没有交互区域</CardTitle>
-                <CardDescription>从完整 App 画面框出输入区、会话区或侧边栏；手机和电脑都能操作。</CardDescription>
-              </CardHeader>
-              <CardFooter><Button variant="primary" onClick={beginRegion}><Scan data-icon="inline-start" />开始划分</Button></CardFooter>
-            </Card>
-          ) : null}
-
-          {!editing && profile.regions.length ? (
-            <RegionLayoutCanvas
-              target={selectedApp}
-              stream={stream}
-              regions={profile.regions}
-              editing={layoutEditing}
-              onCommit={(regions) => void persistRegions(regions)}
-              onEditCrop={editRegion}
-              onRemove={(regionId) => void removeRegion(regionId)}
-              onError={handleRemoteError}
-            />
-          ) : null}
+          <FullscreenDock>
+            <DockAction label="应用画板" onClick={() => setViewMode("apps")}><Grid2X2 className="size-6" /></DockAction>
+            <DockSeparator />
+            <DockAction label={selectedApp.appName || selectedApp.title} className="size-14 rounded-[1.15rem] bg-white p-1 hover:bg-white">
+              <AppIcon target={selectedApp} className="size-full rounded-[0.9rem]" />
+            </DockAction>
+            {profile?.regions.length ? (
+              <DockAction label={layoutEditing ? "完成布局" : "调整布局"} onClick={() => setLayoutEditing((value) => !value)}>
+                {layoutEditing ? <Check className="size-6" /> : <PanelsTopLeft className="size-6" />}
+              </DockAction>
+            ) : null}
+            {!editing ? <DockAction label="添加区域" onClick={beginRegion}><Plus className="size-6" /></DockAction> : null}
+          </FullscreenDock>
+          {error ? <Alert className="absolute inset-x-3 top-20 z-[10000]" variant="destructive"><CircleAlert /><AlertDescription>{error}</AlertDescription></Alert> : null}
         </section>
-      ) : null}
-
-      {viewMode === "regions" && selectedApp && !profile ? (
-        <Card variant="outlined">
-          <CardHeader>
-            <CardTitle>正在读取区域配置…</CardTitle>
-            <CardDescription>配置从 Mac Host 获取，不再依赖当前浏览器。</CardDescription>
-          </CardHeader>
-        </Card>
       ) : null}
 
       {viewMode === "app" && selectedApp ? (
         <section className="fixed inset-0 overflow-hidden bg-ink" aria-labelledby="app-heading">
           <h2 id="app-heading" className="sr-only">{selectedApp.appName || selectedApp.title}</h2>
           <RemoteCanvas target={selectedApp} stream={stream} region={FULL_REGION} onError={handleRemoteError} fillViewport />
-          <div className="absolute inset-x-0 top-0 flex items-center justify-between gap-3 bg-overlay/90 px-3 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur-xl">
-            <Button size="sm" variant="secondary" onClick={() => setViewMode("apps")}><ChevronLeft data-icon="inline-start" />应用</Button>
-            <p className="min-w-0 flex-1 truncate text-center text-body-sm font-semibold">{selectedApp.appName || selectedApp.title}</p>
-            <Button size="icon-sm" variant="secondary" aria-label="查看交互区域" onClick={() => setViewMode("regions")}><Grid2X2 data-icon="inline-start" /></Button>
-            <Button size="icon-sm" variant="secondary" aria-label="进入全屏" onClick={() => void toggleFullscreen()}><Maximize2 data-icon="inline-start" /></Button>
-          </div>
-          <p className="pointer-events-none absolute inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] rounded-full bg-overlay/90 px-3 py-2 text-center text-xs text-muted shadow-overlay backdrop-blur">
-            单指拖动 · 长按右键 · 双指滚动；鼠标左右键与滚轮直通
-          </p>
+          <FullscreenDock>
+            <DockAction label="应用画板" onClick={() => setViewMode("apps")}><Grid2X2 className="size-6" /></DockAction>
+            <DockSeparator />
+            <DockAction label={selectedApp.appName || selectedApp.title} className="size-14 rounded-[1.15rem] bg-white p-1 hover:bg-white">
+              <AppIcon target={selectedApp} className="size-full rounded-[0.9rem]" />
+            </DockAction>
+            <DockAction label="交互区域" onClick={() => setViewMode("regions")}><PanelsTopLeft className="size-6" /></DockAction>
+          </FullscreenDock>
           {error ? <Alert className="absolute inset-x-3 top-20" variant="destructive"><CircleAlert /><AlertDescription>{error}</AlertDescription></Alert> : null}
         </section>
       ) : null}
@@ -461,26 +449,15 @@ export default function App() {
           {displayTarget ? (
             <RemoteCanvas target={displayTarget} stream={stream} onError={handleRemoteError} fillViewport />
           ) : <p className="text-body-sm text-muted">没有可用显示器。</p>}
-          <div className="absolute inset-x-0 top-0 flex items-center justify-between gap-3 bg-overlay/90 px-3 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur-xl">
-            <Button size="sm" variant="secondary" onClick={() => setViewMode("app")}><Scan data-icon="inline-start" />完整 App</Button>
-            <p className="min-w-0 flex-1 truncate text-center text-body-sm font-semibold">完整桌面</p>
-            <Button size="icon-sm" variant="secondary" aria-label="进入全屏" onClick={() => void toggleFullscreen()}><Maximize2 data-icon="inline-start" /></Button>
-          </div>
-          <p className="pointer-events-none absolute inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] rounded-full bg-overlay/90 px-3 py-2 text-center text-xs text-muted shadow-overlay backdrop-blur">
-            单指拖动 · 长按右键 · 双指滚动；鼠标左右键与滚轮直通
-          </p>
+          <FullscreenDock>
+            <DockAction label="完整 App" onClick={() => setViewMode("app")}><Scan className="size-6" /></DockAction>
+            <DockSeparator />
+            <DockAction label="完整桌面" className="size-14 rounded-[1.15rem] bg-white/15 hover:bg-white/25"><Monitor className="size-6" /></DockAction>
+          </FullscreenDock>
           {error ? <Alert className="absolute inset-x-3 top-20" variant="destructive"><CircleAlert /><AlertDescription>{error}</AlertDescription></Alert> : null}
         </section>
       ) : null}
 
-      {!immersive ? <footer className="fixed inset-x-0 bottom-0 mx-auto w-full max-w-md px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-        <nav className="grid grid-cols-4 gap-1 rounded-sheet border border-line bg-overlay/95 p-2 shadow-nav backdrop-blur-xl" aria-label="控制层级">
-          <Button className="min-w-0 px-2" variant={viewMode === "apps" ? "primary" : "ghost"} size="sm" onClick={() => setViewMode("apps")}><AppWindow />应用</Button>
-          <Button className="min-w-0 px-2" variant={viewMode === "regions" ? "primary" : "ghost"} size="sm" disabled={!selectedApp} onClick={() => setViewMode("regions")}><Grid2X2 />区域</Button>
-          <Button className="min-w-0 px-2" variant="ghost" size="sm" disabled={!selectedApp} onClick={() => setViewMode("app")}><Scan />App</Button>
-          <Button className="min-w-0 px-2" variant="ghost" size="sm" disabled={!displayTarget} onClick={() => setViewMode("desktop")}><Monitor />桌面</Button>
-        </nav>
-      </footer> : null}
     </main>
   );
 }

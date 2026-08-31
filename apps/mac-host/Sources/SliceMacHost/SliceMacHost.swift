@@ -44,6 +44,10 @@ struct SliceMacHost {
             try await ApplicationCatalog.launch(path: arguments.require("path"))
             try printJSON(["ok": true])
 
+        case "close-app":
+            try ApplicationCatalog.close(path: arguments.require("path"))
+            try printJSON(["ok": true])
+
         case "app-icon":
             try AppIconService.write(
                 bundleIdentifier: arguments.require("bundle-id"),
@@ -68,6 +72,11 @@ struct SliceMacHost {
                 maxWidth: maxWidth,
                 framesPerSecond: framesPerSecond
             )
+
+        case "input-stream":
+            let spec = try arguments.target()
+            let target = try await TargetCatalog.resolve(kind: spec.kind, id: spec.id)
+            try await InputService.runInputStream(target: target)
 
         case "click":
             let spec = try arguments.target()

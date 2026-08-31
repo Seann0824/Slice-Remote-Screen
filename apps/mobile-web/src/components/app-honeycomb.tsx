@@ -9,8 +9,9 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from "react";
 import type { InstalledApp } from "@slice/protocol";
-import { Button, cn } from "@slice/design-system";
+import { Button, cn, Input } from "@slice/design-system";
 import { AppIcon } from "./app-icon";
+import { Monitor, Search, Trash2, X } from "lucide-react";
 
 type Point = { x: number; y: number };
 type CameraBounds = { minX: number; maxX: number; minY: number; maxY: number };
@@ -18,6 +19,8 @@ type CameraBounds = { minX: number; maxX: number; minY: number; maxY: number };
 type DragState = {
   pointerId: number;
   targetKey: string | null;
+  mode: "pending" | "canvas" | "app";
+  longPressTimer: number | null;
   startX: number;
   startY: number;
   lastX: number;
@@ -217,9 +220,17 @@ function animateIntoApplication(element: HTMLElement, open: () => void) {
 export function AppHoneycomb({
   apps,
   onSelect,
+  onCloseApp,
+  onOpenDesktop,
+  displayAvailable = false,
+  fullScreen = false,
 }: {
   apps: InstalledApp[];
   onSelect: (app: InstalledApp) => void | Promise<void>;
+  onCloseApp: (app: InstalledApp) => void | Promise<void>;
+  onOpenDesktop?: () => void;
+  displayAvailable?: boolean;
+  fullScreen?: boolean;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef(new Map<string, HTMLDivElement>());
@@ -228,16 +239,38 @@ export function AppHoneycomb({
   const wheelTimerRef = useRef<number | null>(null);
   const ignorePointerClickUntilRef = useRef(0);
   const animationRef = useRef<number | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const trashRef = useRef<HTMLButtonElement>(null);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const [dragging, setDragging] = useState(false);
+  const [draggingAppKey, setDraggingAppKey] = useState<string | null>(null);
+  const [dragPoint, setDragPoint] = useState<Point>({ x: 0, y: 0 });
+  const [trashHighlighted, setTrashHighlighted] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const [focusedKey, setFocusedKey] = useState<string | null>(() => apps[0]?.appKey ?? null);
 
+  const visibleApps = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    if (!normalizedQuery) return apps;
+    return apps.filter((app) => `${app.appName} ${app.bundleIdentifier ?? ""}`.toLocaleLowerCase().includes(normalizedQuery));
+  }, [apps, query]);
   const spacing = clamp(viewport.width * 0.255, 88, 112);
-  const points = useMemo(() => createHoneycombPoints(apps.length, spacing), [spacing, apps.length]);
+  const points = useMemo(() => createHoneycombPoints(visibleApps.length, spacing), [spacing, visibleApps.length]);
   const bounds = useMemo(() => getBounds(points), [points]);
-  const keys = useMemo<string[]>(() => apps.map((app) => app.appKey), [apps]);
-  const targetSignature = keys.join("|");
-  const focusedApp = apps.find((app) => app.appKey === focusedKey) ?? apps[0];
+  const keys = useMemo<string[]>(() => visibleApps.map((app) => app.appKey), [visibleApps]);
+  const targetSignature = `${query.trim()}|${keys.join("|")}`;
+  const focusedApp = visibleApps.find((app) => app.appKey === focusedKey) ?? visibleApps[0];
+  const draggingApp = apps.find((app) => app.appKey === draggingAppKey);
+  const dockApps = useMemo(() => {
+    const currentApp = apps.find((app) => app.appKey === focusedKey);
+    const candidates = [
+      currentApp,
+      ...apps.filter((app) => app.isRunning || app.hasOpenWindow),
+      ...apps,
+    ].filter((app): app is InstalledApp => Boolean(app));
+    return [...new Map(candidates.map((app) => [app.appKey, app])).values()].slice(0, 7);
+  }, [apps, focusedKey]);
 
   const cancelAnimation = useCallback(() => {
     if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
@@ -319,7 +352,7 @@ export function AppHoneycomb({
   const activate = useCallback((key: string) => {
     const index = keys.indexOf(key);
     const point = points[index];
-    const app = apps[index];
+    const app = visibleApps[index];
     if (!point || !app) return;
     const distanceToCenter = Math.hypot(point.x + cameraRef.current.x, point.y + cameraRef.current.y);
     if (distanceToCenter <= CENTER_SLOP) {
@@ -329,7 +362,7 @@ export function AppHoneycomb({
       return;
     }
     focusIndex(index);
-  }, [apps, focusIndex, keys, onSelect, points]);
+  }, [focusIndex, keys, onSelect, points, visibleApps]);
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -351,6 +384,10 @@ export function AppHoneycomb({
     setFocusedKey(keys[0] ?? null);
   }, [cancelAnimation, targetSignature]);
 
+  useEffect(() => {
+    if (searchOpen) searchInputRef.current?.focus();
+  }, [searchOpen]);
+
   useLayoutEffect(() => {
     renderScene();
   }, [renderScene, focusedKey]);
@@ -360,6 +397,13 @@ export function AppHoneycomb({
     if (wheelTimerRef.current !== null) window.clearTimeout(wheelTimerRef.current);
   }, [cancelAnimation]);
 
+  const isPointInTrash = useCallback((x: number, y: number) => {
+    const element = trashRef.current;
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    return x >= rect.left - 12 && x <= rect.right + 12 && y >= rect.top - 12 && y <= rect.bottom + 12;
+  }, []);
+
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || dragRef.current) return;
     cancelAnimation();
@@ -367,6 +411,8 @@ export function AppHoneycomb({
     dragRef.current = {
       pointerId: event.pointerId,
       targetKey: target?.dataset.appKey ?? null,
+      mode: target?.dataset.appKey ? "pending" : "canvas",
+      longPressTimer: null,
       startX: event.clientX,
       startY: event.clientY,
       lastX: event.clientX,
@@ -376,6 +422,17 @@ export function AppHoneycomb({
       velocityY: 0,
       moved: false,
     };
+    if (target?.dataset.appKey) {
+      const targetKey = target.dataset.appKey;
+      dragRef.current.longPressTimer = window.setTimeout(() => {
+        const drag = dragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId || drag.targetKey !== targetKey || drag.mode !== "pending") return;
+        drag.mode = "app";
+        drag.moved = true;
+        setDraggingAppKey(targetKey);
+        setDragPoint({ x: drag.lastX, y: drag.lastY });
+      }, 500);
+    }
     setDragging(true);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
@@ -386,10 +443,17 @@ export function AppHoneycomb({
     const deltaX = event.clientX - drag.lastX;
     const deltaY = event.clientY - drag.lastY;
     const elapsed = Math.max((event.timeStamp - drag.lastTime) / 1000, 1 / 240);
-    if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > TAP_SLOP) {
+    const movedDistance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+    if (drag.mode === "pending" && movedDistance > TAP_SLOP) {
+      if (drag.longPressTimer !== null) window.clearTimeout(drag.longPressTimer);
+      drag.longPressTimer = null;
+      drag.mode = "canvas";
       drag.moved = true;
     }
-    if (drag.moved) {
+    if (drag.mode === "app") {
+      setDragPoint({ x: event.clientX, y: event.clientY });
+      setTrashHighlighted(isPointInTrash(event.clientX, event.clientY));
+    } else if (drag.mode === "canvas" && drag.moved) {
       const instantaneousX = deltaX / elapsed;
       const instantaneousY = deltaY / elapsed;
       drag.velocityX = drag.velocityX * 0.7 + instantaneousX * 0.3;
@@ -406,10 +470,21 @@ export function AppHoneycomb({
   const finishPointer = (event: ReactPointerEvent<HTMLDivElement>, cancelled = false) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
+    if (drag.longPressTimer !== null) window.clearTimeout(drag.longPressTimer);
     dragRef.current = null;
     setDragging(false);
+    const draggedApp = drag.targetKey ? apps.find((app) => app.appKey === drag.targetKey) : null;
+    const droppedInTrash = drag.mode === "app" && !cancelled && isPointInTrash(event.clientX, event.clientY);
+    setDraggingAppKey(null);
+    setTrashHighlighted(false);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (drag.mode === "app") {
+      ignorePointerClickUntilRef.current = performance.now() + 500;
+      if (droppedInTrash && draggedApp) void onCloseApp(draggedApp);
+      return;
     }
 
     if (!cancelled && !drag.moved && drag.targetKey) {
@@ -417,7 +492,7 @@ export function AppHoneycomb({
       activate(drag.targetKey);
       return;
     }
-    snapToNearest(cancelled ? undefined : { x: drag.velocityX, y: drag.velocityY });
+    if (!cancelled) snapToNearest({ x: drag.velocityX, y: drag.velocityY });
   };
 
   const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
@@ -431,11 +506,13 @@ export function AppHoneycomb({
   };
 
   return (
-    <div className="relative overflow-hidden rounded-sheet bg-inset">
+    <div className={cn("relative overflow-hidden bg-inset", fullScreen ? "z-[100] h-full" : "rounded-sheet")}>
       <div
         ref={viewportRef}
         className={cn(
-          "relative h-[min(62dvh,34rem)] min-h-96 touch-none select-none overflow-hidden overscroll-none",
+          fullScreen
+            ? "relative h-full min-h-0 touch-none select-none overflow-hidden overscroll-none"
+            : "relative h-[min(62dvh,34rem)] min-h-96 touch-none select-none overflow-hidden overscroll-none",
           dragging ? "cursor-grabbing" : "cursor-grab",
         )}
         role="list"
@@ -447,7 +524,7 @@ export function AppHoneycomb({
         onLostPointerCapture={(event) => finishPointer(event, true)}
         onWheel={handleWheel}
       >
-        {apps.map((app, index) => {
+        {visibleApps.map((app, index) => {
           const key = keys[index]!;
           const name = app.appName;
           return (
@@ -492,11 +569,126 @@ export function AppHoneycomb({
           );
         })}
       </div>
-      <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center px-4">
+      {!visibleApps.length ? (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-8 text-center">
+          <div>
+            <p className="text-sm font-semibold text-ink">没有找到匹配的应用</p>
+            <p className="mt-1 text-xs text-muted">换个名称或 Bundle ID 试试</p>
+          </div>
+        </div>
+      ) : null}
+      <div className={cn(
+        "pointer-events-none absolute inset-x-0 z-[10001] flex justify-center px-4",
+        fullScreen
+          ? "bottom-[max(6rem,calc(env(safe-area-inset-bottom)+5rem))]"
+          : "bottom-4",
+      )}>
         <p className="max-w-full truncate rounded-full bg-surface/90 px-3 py-1.5 text-xs font-medium text-ink shadow-overlay" aria-live="polite">
           {focusedApp?.appName || "拖动选择应用"}{focusedApp?.isRunning ? " · 运行中" : ""}
         </p>
       </div>
+      {draggingApp ? (
+        <div
+          className="pointer-events-none fixed z-[10001] size-16 -translate-x-1/2 -translate-y-1/2 scale-110 rounded-[1.2rem] bg-white p-1 shadow-[0_18px_50px_rgb(0_0_0/45%)]"
+          style={{ left: dragPoint.x, top: dragPoint.y }}
+          aria-hidden="true"
+        >
+          <AppIcon target={draggingApp} className="size-full rounded-[1rem]" />
+        </div>
+      ) : null}
+      {fullScreen ? (
+        <>
+          {searchOpen ? (
+            <div className="pointer-events-auto absolute inset-x-4 bottom-[max(5.75rem,calc(env(safe-area-inset-bottom)+4.75rem))] z-[10000] mx-auto flex w-[calc(100%-2rem)] max-w-sm items-center gap-2 rounded-sheet border border-white/15 bg-black/75 p-2 shadow-[0_16px_50px_rgb(0_0_0/35%)] backdrop-blur-2xl">
+              <Search className="ml-2 size-4 shrink-0 text-white/65" aria-hidden="true" />
+              <Input
+                ref={searchInputRef}
+                className="h-10 min-w-0 flex-1 border-0 bg-transparent px-2 text-white placeholder:text-white/45 hover:bg-transparent focus:bg-transparent focus:ring-0"
+                value={query}
+                placeholder="搜索应用名称或 Bundle ID"
+                aria-label="搜索应用名称或 Bundle ID"
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    setQuery("");
+                    setSearchOpen(false);
+                  }
+                }}
+              />
+              <Button
+                className="text-white hover:bg-white/15"
+                size="icon-sm"
+                variant="ghost"
+                aria-label="关闭应用搜索"
+                onClick={() => { setQuery(""); setSearchOpen(false); }}
+              >
+                <X />
+              </Button>
+            </div>
+          ) : null}
+          <div className="pointer-events-none absolute inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[9999] flex justify-center">
+            <nav
+              className="pointer-events-auto flex max-w-full items-end gap-1.5 overflow-x-auto overflow-y-visible rounded-[1.75rem] border border-white/20 bg-black/55 px-2.5 py-2.5 shadow-[0_18px_60px_rgb(0_0_0/45%)] backdrop-blur-2xl"
+              aria-label="全局远程控制"
+            >
+              {dockApps.map((app) => (
+                <Button
+                  key={app.appKey}
+                  className={cn(
+                    "group relative size-14 shrink-0 rounded-[1.15rem] border border-white/10 bg-white/10 p-1 text-white shadow-lg transition-transform hover:-translate-y-2 hover:bg-white/20",
+                    focusedKey === app.appKey && "ring-2 ring-white/70 ring-offset-2 ring-offset-black/60",
+                  )}
+                  size="icon"
+                  variant="ghost"
+                  aria-label={`打开${app.appName}`}
+                  aria-current={focusedKey === app.appKey ? "true" : undefined}
+                  title={app.appName}
+                  onClick={() => void onSelect(app)}
+                >
+                  <AppIcon target={app} className="size-full rounded-[0.95rem]" />
+                  {app.isRunning ? <span className="absolute bottom-1 right-1 size-2 rounded-full border border-black/60 bg-white" aria-hidden="true" /> : null}
+                </Button>
+              ))}
+              {dockApps.length ? <span className="mx-1 h-10 w-px shrink-0 bg-white/25" aria-hidden="true" /> : null}
+              <Button
+                className="group relative size-12 shrink-0 rounded-[1rem] border border-white/10 bg-white/10 text-white shadow-lg transition-transform hover:-translate-y-1 hover:bg-white/20"
+                size="icon"
+                variant="ghost"
+                aria-label="搜索应用"
+                title="搜索应用"
+                onClick={() => setSearchOpen(true)}
+              >
+                <Search className="size-6" />
+              </Button>
+              <Button
+                className="group relative size-12 shrink-0 rounded-[1rem] border border-white/10 bg-white/10 text-white shadow-lg transition-transform hover:-translate-y-1 hover:bg-white/20"
+                size="icon"
+                variant="ghost"
+                aria-label="打开全局远程控制"
+                title="全局远程控制"
+                disabled={!displayAvailable}
+                onClick={onOpenDesktop}
+              >
+                <Monitor className="size-7" />
+              </Button>
+              <span className="mx-1 h-10 w-px shrink-0 bg-white/25" aria-hidden="true" />
+              <Button
+                ref={trashRef}
+                className={cn(
+                  "group relative size-12 shrink-0 rounded-[1rem] border border-white/10 bg-white/10 text-white shadow-lg transition-transform hover:-translate-y-1 hover:bg-white/20",
+                  trashHighlighted && "-translate-y-2 border-danger bg-danger/35 text-white ring-2 ring-danger/60",
+                )}
+                size="icon"
+                variant="ghost"
+                aria-label="拖到这里关闭应用"
+                title="拖到这里关闭应用"
+              >
+                <Trash2 className="size-6" />
+              </Button>
+            </nav>
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }

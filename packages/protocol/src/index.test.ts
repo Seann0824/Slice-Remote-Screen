@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appProfileSchema, canvasRectSchema, clickRequestSchema, mapRegionPoint, normalizedRegionSchema, pointerGestureSchema, remoteTargetSchema, targetKey } from "./index";
+import { appProfileSchema, canvasRectSchema, clickRequestSchema, mapRegionPoint, normalizedRegionSchema, pointerControlSchema, pointerGestureSchema, remoteTargetSchema, targetKey } from "./index";
 
 describe("protocol schemas", () => {
   it("rejects click coordinates outside the normalized target", () => {
@@ -66,6 +66,24 @@ describe("protocol schemas", () => {
       type: "drag",
       points: [{ x: 0.1, y: 0.2 }],
     }).success).toBe(false);
+    expect(pointerGestureSchema.parse({
+      type: "click",
+      x: 0.4,
+      y: 0.5,
+      clickCount: 2,
+    })).toMatchObject({ type: "click", clickCount: 2 });
+    expect(pointerGestureSchema.safeParse({
+      type: "click",
+      x: 0.4,
+      y: 0.5,
+      clickCount: 3,
+    }).success).toBe(false);
+  });
+
+  it("validates realtime pointer controls", () => {
+    expect(pointerControlSchema.safeParse({ type: "down", button: "left", x: 0.2, y: 0.3 }).success).toBe(true);
+    expect(pointerControlSchema.safeParse({ type: "move", x: 0.4, y: 0.5 }).success).toBe(true);
+    expect(pointerControlSchema.safeParse({ type: "up", x: 0.4, y: 0.5 }).success).toBe(true);
   });
 
   it("rejects a region crossing the app boundary", () => {
