@@ -1,0 +1,19 @@
+{
+  "name": "Slice Remote Screen",
+  "short_name": "Slice Remote",
+  "description": "把 Mac 应用操作区域切成手机上的快捷控制，同时保留完整窗口和桌面远控。",
+  "start_url": "/",
+  "display": "fullscreen",
+  "display_override": ["fullscreen", "standalone"],
+  "orientation": "any",
+  "background_color": "#f7f7f5",
+  "theme_color": "#f7f7f5",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

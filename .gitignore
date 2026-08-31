@@ -1,0 +1,8 @@
+node_modules/
+.pnpm-store/
+dist/
+.DS_Store
+*.log
+*.tsbuildinfo
+apps/mac-host/.build/
+apps/mobile-web/.vite/

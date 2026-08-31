@@ -1,0 +1,19 @@
+{
+  "name": "slice-remote-screen",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.25.0",
+  "scripts": {
+    "build": "pnpm protocol:build && pnpm --filter @slice/mobile-web build && pnpm --filter @slice/local-host build && pnpm host:build",
+    "build:web": "pnpm protocol:build && pnpm --filter @slice/mobile-web build",
+    "check": "pnpm protocol:build && pnpm -r --if-present check && pnpm host:build",
+    "dev:api": "pnpm protocol:build && pnpm --filter @slice/local-host dev",
+    "dev:web": "pnpm protocol:build && pnpm --filter @slice/mobile-web dev",
+    "host:build": "bash scripts/build-mac-host-app.sh",
+    "host:permissions": "pnpm host:build && dist/SliceRemoteScreenHost.app/Contents/MacOS/slice-mac-host permissions --request",
+    "mvp": "pnpm build && pnpm --filter @slice/local-host start",
+    "mvp:lan": "bash scripts/start-lan.sh",
+    "protocol:build": "pnpm --filter @slice/protocol build",
+    "test": "pnpm protocol:build && pnpm -r --if-present test"
+  }
+}
