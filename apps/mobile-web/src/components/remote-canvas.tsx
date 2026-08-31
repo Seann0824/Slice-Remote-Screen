@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState, type PointerEvent, type WheelEvent } from "react";
-import { mapRegionPoint, type NormalizedRegion, type PointerControl, type PointerGesture, type RemoteTarget } from "@slice/protocol";
-import { Badge, Skeleton, cn } from "@slice/design-system";
+import { useCallback, useEffect, useRef, useState, type CompositionEvent, type FormEvent, type KeyboardEvent, type PointerEvent, type WheelEvent } from "react";
+import { mapRegionDelta, mapRegionPoint, type NormalizedRegion, type PointerControl, type PointerGesture, type RemoteTarget } from "@slice/protocol";
+import { Badge, Button, Skeleton, cn } from "@slice/design-system";
+import { LocateFixed, Minus, Plus } from "lucide-react";
 import { hostApi } from "../api";
 import type { RemoteStream } from "./use-remote-stream";
 
 export const FULL_REGION: NormalizedRegion = {
-  id: "full", name: "完整画面", x: 0, y: 0, width: 1, height: 1,
+  id: "full", name: "完整画面", x: 0, y: 0, width: 1, height: 1, rotation: 0,
 };
 
 type RemoteCanvasProps = {
@@ -22,6 +23,7 @@ type RemoteCanvasProps = {
   fillContainer?: boolean;
   disabled?: boolean;
   inputChannel?: RemoteInputChannel | null;
+  allowMultiTouchScroll?: boolean;
 };
 
 export type RemoteInputChannel = ReturnType<typeof hostApi.inputStream>;
@@ -32,6 +34,10 @@ type SelectionGesture = {
   handle?: SelectionHandle;
   start: { x: number; y: number };
   initial: NormalizedRegion | null;
+};
+type SelectionPinch = {
+  distance: number;
+  zoom: number;
 };
 type RemoteGesture = {
   pointerId: number;
@@ -47,6 +53,7 @@ type RemoteGesture = {
 
 function pointInSurface(event: PointerEvent<HTMLDivElement>) {
   const rect = event.currentTarget.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 };
   return {
     x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
     y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
@@ -97,11 +104,19 @@ export function RemoteCanvas({
   fillContainer = false,
   disabled = false,
   inputChannel,
+  allowMultiTouchScroll = true,
 }: RemoteCanvasProps) {
   const [isActing, setIsActing] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const mobileInputRef = useRef<HTMLTextAreaElement>(null);
+  const mobilePointerRef = useRef(false);
+  const composingRef = useRef(false);
+  const textQueueRef = useRef(Promise.resolve());
   const selectionGesture = useRef<SelectionGesture | null>(null);
+  const selectionTouches = useRef(new Map<number, { clientX: number; clientY: number }>());
+  const selectionPinch = useRef<SelectionPinch | null>(null);
   const activeSelection = useRef<NormalizedRegion | null>(selection);
+  const [selectionZoom, setSelectionZoom] = useState(1);
   const remoteGesture = useRef<RemoteGesture | null>(null);
   const longPressTimer = useRef<number | null>(null);
   const wheelTimer = useRef<number | null>(null);
@@ -115,7 +130,41 @@ export function RemoteCanvas({
   const gestureQueueRef = useRef(Promise.resolve());
   const pendingGesturesRef = useRef(0);
 
+  const enqueueText = useCallback((text: string) => {
+    if (!text) return;
+    textQueueRef.current = textQueueRef.current
+      .catch(() => undefined)
+      .then(() => hostApi.type(target, text))
+      .catch((error) => onError(error instanceof Error ? error.message : String(error)));
+  }, [onError, target]);
+
+  const enqueueKey = useCallback((key: "enter" | "delete") => {
+    textQueueRef.current = textQueueRef.current
+      .catch(() => undefined)
+      .then(() => hostApi.key(target, { key, modifiers: [] }))
+      .catch((error) => onError(error instanceof Error ? error.message : String(error)));
+  }, [onError, target]);
+
+  const handleInputTarget = useCallback((editable: boolean) => {
+    if (!editable) {
+      mobileInputRef.current?.blur();
+      return;
+    }
+    if (mobilePointerRef.current) {
+      // Keep this focus in the original touch path when possible. Mobile Safari
+      // blocks a keyboard opened only from an asynchronous WebSocket callback.
+      mobileInputRef.current?.focus({ preventScroll: true });
+    }
+  }, []);
+
   useEffect(() => { activeSelection.current = selection; }, [selection]);
+
+  useEffect(() => {
+    setSelectionZoom(1);
+    selectionGesture.current = null;
+    selectionTouches.current.clear();
+    selectionPinch.current = null;
+  }, [selectionMode, target.id]);
 
   useEffect(() => () => {
     if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
@@ -125,7 +174,7 @@ export function RemoteCanvas({
 
   useEffect(() => {
     if (inputChannel !== undefined || selectionMode || disabled) return;
-    const channel = hostApi.inputStream(target, onError);
+    const channel = hostApi.inputStream(target, onError, handleInputTarget);
     inputStreamRef.current = channel;
     return () => {
       channel.close();
@@ -136,7 +185,12 @@ export function RemoteCanvas({
       }
       realtimeMoveRef.current = null;
     };
-  }, [disabled, inputChannel, onError, selectionMode, target]);
+  }, [disabled, handleInputTarget, inputChannel, onError, selectionMode, target]);
+
+  useEffect(() => {
+    if (!inputChannel || selectionMode || disabled) return;
+    return inputChannel.subscribeInputTarget(handleInputTarget);
+  }, [disabled, handleInputTarget, inputChannel, selectionMode]);
 
   useEffect(() => {
     const draw = () => {
@@ -146,15 +200,32 @@ export function RemoteCanvas({
       const sy = Math.round(region.y * stream.source.height);
       const sw = Math.max(1, Math.round(region.width * stream.source.width));
       const sh = Math.max(1, Math.round(region.height * stream.source.height));
-      if (canvas.width !== sw || canvas.height !== sh) {
-        canvas.width = sw;
-        canvas.height = sh;
+      const rotation = region.rotation ?? 0;
+      const outputWidth = rotation === 90 || rotation === 270 ? sh : sw;
+      const outputHeight = rotation === 90 || rotation === 270 ? sw : sh;
+      if (canvas.width !== outputWidth || canvas.height !== outputHeight) {
+        canvas.width = outputWidth;
+        canvas.height = outputHeight;
       }
-      canvas.getContext("2d", { alpha: false })?.drawImage(stream.source, sx, sy, sw, sh, 0, 0, sw, sh);
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) return;
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.clearRect(0, 0, outputWidth, outputHeight);
+      if (rotation === 90) {
+        context.translate(outputWidth, 0);
+        context.rotate(Math.PI / 2);
+      } else if (rotation === 180) {
+        context.translate(outputWidth, outputHeight);
+        context.rotate(Math.PI);
+      } else if (rotation === 270) {
+        context.translate(0, outputHeight);
+        context.rotate(-Math.PI / 2);
+      }
+      context.drawImage(stream.source, sx, sy, sw, sh, 0, 0, sw, sh);
     };
     draw();
     return stream.subscribe(draw);
-  }, [region.height, region.width, region.x, region.y, stream]);
+  }, [region.height, region.rotation, region.width, region.x, region.y, stream]);
 
   const canvasPoint = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
@@ -166,11 +237,19 @@ export function RemoteCanvas({
   };
 
   const performGesture = (gesture: PointerGesture) => {
+    const input = inputChannel ?? inputStreamRef.current;
+    if (gesture.type === "click" && input) {
+      input.send(gesture);
+      return Promise.resolve();
+    }
+    const mappedGesture = gesture.type === "scroll"
+      ? { ...gesture, ...mapRegionDelta(region.rotation ?? 0, gesture.deltaX, gesture.deltaY) }
+      : gesture;
     pendingGesturesRef.current += 1;
     setIsActing(true);
     const task = gestureQueueRef.current
       .catch(() => undefined)
-      .then(() => hostApi.gesture(target, gesture))
+      .then(() => hostApi.gesture(target, mappedGesture))
       .catch((error) => onError(error instanceof Error ? error.message : String(error)))
       .finally(() => {
         pendingGesturesRef.current -= 1;
@@ -205,24 +284,36 @@ export function RemoteCanvas({
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (selectionMode) {
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const point = pointInSurface(event);
-    const target = event.target as HTMLElement;
-    const handle = target.closest<HTMLElement>("[data-selection-handle]")?.dataset.selectionHandle as SelectionHandle | undefined;
-    const insideSelection = Boolean(target.closest("[data-selection-box]"));
-    selectionGesture.current = {
-      kind: handle ? "resize" : insideSelection && selection ? "move" : "create",
-      handle,
-      start: point,
-      initial: selection,
-    };
-    if (!handle && !insideSelection) {
-      activeSelection.current = null;
-      onSelectionChange?.(null);
-    }
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      if (event.pointerType === "touch") {
+        selectionTouches.current.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
+        if (selectionTouches.current.size >= 2) {
+          selectionGesture.current = null;
+          const values = [...selectionTouches.current.values()].slice(0, 2);
+          const distance = Math.hypot(values[0]!.clientX - values[1]!.clientX, values[0]!.clientY - values[1]!.clientY);
+          selectionPinch.current = { distance: Math.max(1, distance), zoom: selectionZoom };
+          return;
+        }
+      }
+      const point = pointInSurface(event);
+      const target = event.target as HTMLElement;
+      const handle = target.closest<HTMLElement>("[data-selection-handle]")?.dataset.selectionHandle as SelectionHandle | undefined;
+      const insideSelection = Boolean(target.closest("[data-selection-box]"));
+      selectionGesture.current = {
+        kind: handle ? "resize" : insideSelection && selection ? "move" : "create",
+        handle,
+        start: point,
+        initial: selection,
+      };
+      if (!handle && !insideSelection) {
+        activeSelection.current = null;
+        onSelectionChange?.(null);
+      }
       return;
     }
     if (disabled || !stream.hasFrame) return;
+    mobilePointerRef.current = event.pointerType === "touch";
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
 
@@ -237,6 +328,10 @@ export function RemoteCanvas({
           if (last) currentInputChannel()?.send({ type: "up", ...last });
         }
         remoteGesture.current = null;
+        if (!allowMultiTouchScroll) {
+          touchScroll.current = null;
+          return;
+        }
         const values = [...touchPoints.current.values()];
         const centerX = (values[0]!.clientX + values[1]!.clientX) / 2;
         const centerY = (values[0]!.clientY + values[1]!.clientY) / 2;
@@ -268,13 +363,22 @@ export function RemoteCanvas({
         const gesture = remoteGesture.current;
         if (!gesture || gesture.moved) return;
         gesture.longPressed = true;
-        const last = gesture.points.at(-1)!;
-        void performGesture({ type: "click", button: "right", clickCount: 1, ...last });
       }, 520);
     }
   };
 
   const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (selectionMode && event.pointerType === "touch" && selectionTouches.current.has(event.pointerId)) {
+      selectionTouches.current.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
+      if (selectionTouches.current.size >= 2 && selectionPinch.current) {
+        const values = [...selectionTouches.current.values()].slice(0, 2);
+        const distance = Math.hypot(values[0]!.clientX - values[1]!.clientX, values[0]!.clientY - values[1]!.clientY);
+        const nextZoom = Math.min(4, Math.max(1, selectionPinch.current.zoom * distance / selectionPinch.current.distance));
+        setSelectionZoom(nextZoom);
+        event.preventDefault();
+        return;
+      }
+    }
     if (!selectionMode && event.pointerType === "touch" && touchPoints.current.has(event.pointerId)) {
       touchPoints.current.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
       const scroll = touchScroll.current;
@@ -292,14 +396,22 @@ export function RemoteCanvas({
     }
     if (!selectionMode) {
       const gesture = remoteGesture.current;
-      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      if (!gesture || gesture.pointerId !== event.pointerId) {
+        if (event.pointerType === "mouse" && !disabled && stream.hasFrame) {
+          const point = canvasPoint(event.clientX, event.clientY);
+          if (point) queueRealtimeMove(point);
+        }
+        return;
+      }
       const point = canvasPoint(event.clientX, event.clientY);
       if (!point) return;
       if (Math.hypot(event.clientX - gesture.startClientX, event.clientY - gesture.startClientY) > 7) {
         gesture.moved = true;
         if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
         const input = currentInputChannel();
-        if (!gesture.realtimeStarted && !gesture.longPressed && input) {
+        if (event.pointerType !== "mouse" && !gesture.longPressed) {
+          queueRealtimeMove(point);
+        } else if (!gesture.realtimeStarted && input) {
           const first = gesture.points[0];
           if (first) input.send({ type: "down", button: gesture.button, ...first });
           gesture.realtimeStarted = true;
@@ -328,6 +440,7 @@ export function RemoteCanvas({
         id: gesture.initial?.id ?? "draft",
         name: gesture.initial?.name ?? "新区域",
         layout: gesture.initial?.layout,
+        rotation: gesture.initial?.rotation ?? 0,
         x: Math.min(point.x, gesture.start.x),
         y: Math.min(point.y, gesture.start.y),
         width: Math.abs(point.x - gesture.start.x),
@@ -373,7 +486,15 @@ export function RemoteCanvas({
         if (last) currentInputChannel()?.send({ type: "up", ...last });
         return;
       }
-      if (gesture.longPressed) return;
+      if (gesture.longPressed && !gesture.moved) {
+        if (finalPoint) void performGesture({ type: "click", button: "right", clickCount: 1, ...finalPoint });
+        return;
+      }
+      if (event.pointerType !== "mouse" && gesture.moved && !gesture.longPressed) {
+        if (finalPoint) queueRealtimeMove(finalPoint);
+        flushRealtimeMove();
+        return;
+      }
       if (finalPoint && gesture.moved) {
         if (Math.hypot(finalPoint.x - gesture.points.at(-1)!.x, finalPoint.y - gesture.points.at(-1)!.y) > 0.001) {
           gesture.points.push(finalPoint);
@@ -406,6 +527,15 @@ export function RemoteCanvas({
       }
       return;
     }
+    if (event.pointerType === "touch") {
+      const wasPinching = Boolean(selectionPinch.current);
+      selectionTouches.current.delete(event.pointerId);
+      if (wasPinching) {
+        if (selectionTouches.current.size < 2) selectionPinch.current = null;
+        selectionGesture.current = null;
+        return;
+      }
+    }
     const gesture = selectionGesture.current;
     if (!selectionMode || !gesture) return;
     selectionGesture.current = null;
@@ -434,6 +564,8 @@ export function RemoteCanvas({
     }
     const initial = selectionGesture.current?.initial ?? null;
     selectionGesture.current = null;
+    selectionTouches.current.clear();
+    selectionPinch.current = null;
     activeSelection.current = initial;
     onSelectionChange?.(initial);
   };
@@ -459,8 +591,56 @@ export function RemoteCanvas({
     }, 70);
   };
 
+  const handleMobileInput = (event: FormEvent<HTMLTextAreaElement>) => {
+    const inputEvent = event.nativeEvent as InputEvent;
+    if (composingRef.current || inputEvent.isComposing) return;
+    const inputType = inputEvent.inputType;
+    if (inputType === "deleteContentBackward" || inputType === "deleteContentForward") {
+      enqueueKey("delete");
+      return;
+    }
+    if (inputType === "insertLineBreak" || inputType === "insertParagraph") {
+      event.currentTarget.value = "";
+      enqueueKey("enter");
+      return;
+    }
+    const value = event.currentTarget.value;
+    if (!value) return;
+    event.currentTarget.value = "";
+    enqueueText(value);
+  };
+
+  const handleMobileCompositionEnd = (event: CompositionEvent<HTMLTextAreaElement>) => {
+    composingRef.current = false;
+    const value = event.currentTarget.value;
+    if (!value) return;
+    event.currentTarget.value = "";
+    enqueueText(value);
+  };
+
+  const handleMobileKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    event.currentTarget.value = "";
+    enqueueKey("enter");
+  };
+
   return (
     <div className={cn("flex flex-col", fillViewport ? "h-dvh" : fillContainer ? "h-full" : "gap-2")}>
+      <textarea
+        ref={mobileInputRef}
+        aria-label="远程文本输入"
+        autoCapitalize="off"
+        autoCorrect="off"
+        className="fixed left-0 top-0 z-[-1] h-px w-px resize-none border-0 bg-transparent p-0 text-transparent opacity-0 caret-transparent outline-none"
+        inputMode="text"
+        onCompositionEnd={handleMobileCompositionEnd}
+        onCompositionStart={() => { composingRef.current = true; }}
+        onInput={handleMobileInput}
+        onKeyDown={handleMobileKeyDown}
+        spellCheck={false}
+        tabIndex={-1}
+      />
       <div className={cn(
         "relative flex touch-none items-center justify-center overflow-hidden bg-ink",
         fillViewport
@@ -475,6 +655,7 @@ export function RemoteCanvas({
             "relative touch-none",
             fillViewport || fillContainer ? "inline-flex max-h-full max-w-full" : "w-full",
           )}
+          style={selectionMode ? { transform: `scale(${selectionZoom})`, transformOrigin: "center" } : undefined}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
@@ -492,14 +673,32 @@ export function RemoteCanvas({
             )}
           />
           {selection ? (
-            <div
-              className="absolute cursor-move border-2 border-primary bg-primary/20"
-              data-selection-box
-              style={{
-                left: `${selection.x * 100}%`, top: `${selection.y * 100}%`,
-                width: `${selection.width * 100}%`, height: `${selection.height * 100}%`,
-              }}
-            >
+            <>
+              <div className="pointer-events-none absolute left-0 right-0 top-0 bg-black/75" style={{ height: `${selection.y * 100}%` }} />
+              <div
+                className="pointer-events-none absolute left-0 bg-black/75"
+                style={{ top: `${selection.y * 100}%`, width: `${selection.x * 100}%`, height: `${selection.height * 100}%` }}
+              />
+              <div
+                className="pointer-events-none absolute right-0 bg-black/75"
+                style={{
+                  top: `${selection.y * 100}%`,
+                  width: `${Math.max(0, 1 - selection.x - selection.width) * 100}%`,
+                  height: `${selection.height * 100}%`,
+                }}
+              />
+              <div
+                className="pointer-events-none absolute bottom-0 left-0 right-0 bg-black/75"
+                style={{ height: `${Math.max(0, 1 - selection.y - selection.height) * 100}%` }}
+              />
+              <div
+                className="absolute cursor-move border-2 border-primary bg-primary/10"
+                data-selection-box
+                style={{
+                  left: `${selection.x * 100}%`, top: `${selection.y * 100}%`,
+                  width: `${selection.width * 100}%`, height: `${selection.height * 100}%`,
+                }}
+              >
               {([
                 ["nw", "-left-5 -top-5 cursor-nwse-resize"],
                 ["ne", "-right-5 -top-5 cursor-nesw-resize"],
@@ -516,9 +715,44 @@ export function RemoteCanvas({
                   <span className="size-3 rounded-full border-2 border-surface bg-primary shadow-overlay" aria-hidden="true" />
                 </button>
               ))}
-            </div>
+              </div>
+            </>
           ) : null}
         </div>
+        {selectionMode ? (
+          <div className="absolute bottom-3 right-3 z-20 flex items-center gap-1 rounded-full border border-white/15 bg-ink/85 p-1 shadow-overlay backdrop-blur" data-canvas-control>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="ghost"
+              aria-label="缩小裁剪画面"
+              disabled={selectionZoom <= 1}
+              onClick={() => setSelectionZoom((value) => Math.max(1, value / 1.25))}
+            >
+              <Minus className="size-4" />
+            </Button>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="ghost"
+              aria-label="重置裁剪缩放"
+              onClick={() => setSelectionZoom(1)}
+            >
+              <LocateFixed className="size-4" />
+            </Button>
+            <span className="min-w-12 text-center text-xs font-medium text-white/80">{Math.round(selectionZoom * 100)}%</span>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="ghost"
+              aria-label="放大裁剪画面"
+              disabled={selectionZoom >= 4}
+              onClick={() => setSelectionZoom((value) => Math.min(4, value * 1.25))}
+            >
+              <Plus className="size-4" />
+            </Button>
+          </div>
+        ) : null}
         {isActing ? <div className="pointer-events-none absolute inset-0 bg-ink/10" aria-hidden="true" /> : null}
         {showStatus ? (
           <Badge className="absolute right-2 top-2" variant={stream.state === "streaming" ? "default" : "secondary"}>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appProfileSchema, canvasRectSchema, clickRequestSchema, mapRegionPoint, normalizedRegionSchema, pointerControlSchema, pointerGestureSchema, remoteTargetSchema, targetKey } from "./index";
+import { appProfileSchema, canvasRectSchema, clickRequestSchema, mapRegionDelta, mapRegionPoint, normalizedRegionSchema, pointerControlSchema, pointerGestureSchema, remoteTargetSchema, targetKey } from "./index";
 
 describe("protocol schemas", () => {
   it("rejects click coordinates outside the normalized target", () => {
@@ -44,6 +44,7 @@ describe("protocol schemas", () => {
     });
     expect(profile.regions).toHaveLength(1);
     expect(profile.regions[0]?.layout).toEqual({ x: 0.03, y: 0.55, width: 0.94, height: 0.4 });
+    expect(profile.regions[0]?.rotation).toBe(0);
   });
 
   it("keeps old region profiles valid when layout is absent", () => {
@@ -84,6 +85,11 @@ describe("protocol schemas", () => {
     expect(pointerControlSchema.safeParse({ type: "down", button: "left", x: 0.2, y: 0.3 }).success).toBe(true);
     expect(pointerControlSchema.safeParse({ type: "move", x: 0.4, y: 0.5 }).success).toBe(true);
     expect(pointerControlSchema.safeParse({ type: "up", x: 0.4, y: 0.5 }).success).toBe(true);
+    expect(pointerControlSchema.parse({ type: "click", x: 0.4, y: 0.5 })).toMatchObject({
+      type: "click",
+      button: "left",
+      clickCount: 1,
+    });
   });
 
   it("rejects a region crossing the app boundary", () => {
@@ -102,5 +108,14 @@ describe("protocol schemas", () => {
       x: 0.4,
       y: 0.75,
     });
+  });
+
+  it("maps rotated region input back into source coordinates", () => {
+    const region = { x: 0.2, y: 0.1, width: 0.4, height: 0.6, rotation: 90 as const };
+    const point = mapRegionPoint(region, 0.25, 0.75);
+    expect(point.x).toBeCloseTo(0.5);
+    expect(point.y).toBeCloseTo(0.55);
+    expect(mapRegionDelta(90, 12, 30)).toEqual({ deltaX: 30, deltaY: -12 });
+    expect(mapRegionDelta(270, 12, 30)).toEqual({ deltaX: -30, deltaY: 12 });
   });
 });

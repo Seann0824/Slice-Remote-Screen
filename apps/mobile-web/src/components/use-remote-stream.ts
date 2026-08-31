@@ -54,7 +54,7 @@ export function useRemoteStream(target: RemoteTarget | null, onError: (message: 
       onError,
       onFrame: (frame) => store.push(frame, () => setHasFrame(true), onError),
     });
-  }, [onError, store, target]);
+  }, [onError, store, target?.id, target?.kind]);
 
   return { source: store.canvas, subscribe: store.subscribe, state, hasFrame };
 }

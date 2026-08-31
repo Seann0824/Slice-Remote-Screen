@@ -4,15 +4,29 @@ import CoreGraphics
 import Foundation
 
 enum InputService {
-    static func activate(_ processID: pid_t?) async throws {
-        guard let processID,
+    static func activate(_ target: ResolvedTarget) async throws {
+        guard let processID = target.processID,
               let application = NSRunningApplication(processIdentifier: processID) else { return }
-        application.activate()
-        try await Task.sleep(for: .milliseconds(90))
+        let changedApplication = !application.isActive
+        if application.isHidden { application.unhide() }
+        if changedApplication {
+            application.activate(options: [.activateAllWindows])
+            for _ in 0..<16 {
+                if NSWorkspace.shared.frontmostApplication?.processIdentifier == processID { break }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+        }
+        let changedWindow = raiseWindow(for: target, processID: processID)
+        if changedApplication {
+            // A fullscreen Space can still be animating after the process becomes frontmost.
+            try await Task.sleep(for: .milliseconds(160))
+        } else if changedWindow {
+            try await Task.sleep(for: .milliseconds(35))
+        }
     }
 
     static func click(target: ResolvedTarget, normalizedX: Double, normalizedY: Double) async throws {
-        try await activate(target.processID)
+        try await activate(target)
         let x = target.frame.minX + target.frame.width * min(max(normalizedX, 0), 1)
         let y = target.frame.minY + target.frame.height * min(max(normalizedY, 0), 1)
         let point = CGPoint(x: x, y: y)
@@ -27,7 +41,7 @@ enum InputService {
     }
 
     static func gesture(target: ResolvedTarget, request: PointerGestureRequest) async throws {
-        try await activate(target.processID)
+        try await activate(target)
         switch request.type {
         case "click":
             guard let x = request.x, let y = request.y else {
@@ -59,7 +73,7 @@ enum InputService {
     }
 
     static func runInputStream(target: ResolvedTarget) async throws {
-        try await activate(target.processID)
+        try await activate(target)
         var activeButton: String?
         var lastPoint: CGPoint?
 
@@ -68,7 +82,17 @@ enum InputService {
             let request = try JSONDecoder().decode(PointerControlRequest.self, from: Data(line.utf8))
             let point = point(target: target, x: request.x, y: request.y)
             switch request.type {
+            case "click":
+                try await activate(target)
+                try postClick(
+                    at: point,
+                    button: request.button ?? "left",
+                    clickCount: min(max(request.clickCount ?? 1, 1), 2)
+                )
+                try await Task.sleep(for: .milliseconds(45))
+                reportInputTarget(target)
             case "down":
+                try await activate(target)
                 let button = request.button ?? "left"
                 if let activeButton, let lastPoint {
                     try postPointer(type: try mouseTypes(activeButton).up, at: lastPoint, button: activeButton)
@@ -98,6 +122,126 @@ enum InputService {
             x: target.frame.minX + target.frame.width * min(max(x, 0), 1),
             y: target.frame.minY + target.frame.height * min(max(y, 0), 1)
         )
+    }
+
+    private static func reportInputTarget(_ target: ResolvedTarget) {
+        let editable = focusedElementIsEditable(target)
+        guard let data = try? JSONSerialization.data(withJSONObject: [
+            "type": "input-target",
+            "editable": editable,
+        ]) else { return }
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+
+    private static func focusedElementIsEditable(_ target: ResolvedTarget) -> Bool {
+        guard let processID = target.processID else { return false }
+        let applicationElement = AXUIElementCreateApplication(processID)
+        var rawFocusedElement: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            applicationElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &rawFocusedElement
+        ) == .success,
+        let rawFocusedElement,
+        CFGetTypeID(rawFocusedElement) == AXUIElementGetTypeID() else { return false }
+        let focusedElement = rawFocusedElement as! AXUIElement
+
+        var rawRole: CFTypeRef?
+        let role = AXUIElementCopyAttributeValue(
+            focusedElement,
+            kAXRoleAttribute as CFString,
+            &rawRole
+        ) == .success ? rawRole as? String : nil
+        let editableRoles = [
+            kAXTextFieldRole as String,
+            kAXTextAreaRole as String,
+            kAXComboBoxRole as String,
+            kAXDateFieldRole as String,
+            kAXTimeFieldRole as String,
+        ]
+        if let role, editableRoles.contains(role) { return true }
+
+        var rawSubrole: CFTypeRef?
+        let subrole = AXUIElementCopyAttributeValue(
+            focusedElement,
+            kAXSubroleAttribute as CFString,
+            &rawSubrole
+        ) == .success ? rawSubrole as? String : nil
+        if subrole == (kAXSecureTextFieldSubrole as String)
+            || subrole == (kAXSearchFieldSubrole as String) { return true }
+
+        var rawEditable: CFTypeRef?
+        if AXUIElementCopyAttributeValue(
+            focusedElement,
+            kAXIsEditableAttribute as CFString,
+            &rawEditable
+        ) == .success,
+        let editable = (rawEditable as? NSNumber)?.boolValue {
+            return editable
+        }
+        return false
+    }
+
+    private static func raiseWindow(for target: ResolvedTarget, processID: pid_t) -> Bool {
+        guard target.descriptor.kind == "window" else { return false }
+        let applicationElement = AXUIElementCreateApplication(processID)
+        var rawWindows: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            applicationElement,
+            kAXWindowsAttribute as CFString,
+            &rawWindows
+        ) == .success,
+        let windows = rawWindows as? [AXUIElement],
+        !windows.isEmpty else { return false }
+
+        let targetWindow = windows.min { windowScore($0, target: target) < windowScore($1, target: target) }
+        guard let targetWindow else { return false }
+        var rawFocusedWindow: CFTypeRef?
+        if AXUIElementCopyAttributeValue(
+            applicationElement,
+            kAXFocusedWindowAttribute as CFString,
+            &rawFocusedWindow
+        ) == .success,
+        let focusedWindow = rawFocusedWindow,
+        CFEqual(focusedWindow, targetWindow) {
+            return false
+        }
+        AXUIElementPerformAction(targetWindow, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(targetWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(targetWindow, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        return true
+    }
+
+    private static func windowScore(_ window: AXUIElement, target: ResolvedTarget) -> Double {
+        var score = 0.0
+        var rawTitle: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &rawTitle) == .success,
+           let title = rawTitle as? String,
+           !target.descriptor.title.isEmpty,
+           title != target.descriptor.title {
+            score += 10_000
+        }
+
+        var rawPosition: CFTypeRef?
+        var rawSize: CFTypeRef?
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        if AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &rawPosition) == .success,
+           let positionValue = rawPosition,
+           CFGetTypeID(positionValue) == AXValueGetTypeID() {
+            AXValueGetValue(positionValue as! AXValue, .cgPoint, &position)
+        }
+        if AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &rawSize) == .success,
+           let sizeValue = rawSize,
+           CFGetTypeID(sizeValue) == AXValueGetTypeID() {
+            AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
+        }
+        score += abs(position.x - target.frame.minX)
+        score += abs(position.y - target.frame.minY)
+        score += abs(size.width - target.frame.width)
+        score += abs(size.height - target.frame.height)
+        return score
     }
 
     private static func mouseButton(_ value: String) throws -> CGMouseButton {
@@ -180,7 +324,7 @@ enum InputService {
     }
 
     static func type(target: ResolvedTarget, text: String) async throws {
-        try await activate(target.processID)
+        try await activate(target)
         for chunk in text.chunked(maxUTF16Units: 20) {
             guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
                   let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
@@ -194,7 +338,7 @@ enum InputService {
     }
 
     static func key(target: ResolvedTarget, key: String, modifiers: [String]) async throws {
-        try await activate(target.processID)
+        try await activate(target)
         let keyCodes: [String: CGKeyCode] = [
             "enter": 36, "escape": 53, "tab": 48, "space": 49, "delete": 51,
             "left": 123, "right": 124, "down": 125, "up": 126,

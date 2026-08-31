@@ -57,6 +57,7 @@ struct PointerGestureRequest: Codable, Sendable {
 struct PointerControlRequest: Codable, Sendable {
     let type: String
     let button: String?
+    let clickCount: Int?
     let x: Double
     let y: Double
 }

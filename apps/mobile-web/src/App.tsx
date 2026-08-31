@@ -109,9 +109,6 @@ function DockSeparator() {
 function FullscreenDock({ children }: { children: ReactNode }) {
   return (
     <div className="pointer-events-none absolute inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[9999] flex flex-col items-center">
-      <p className="mb-2 rounded-full bg-black/65 px-3 py-1.5 text-center text-xs text-white/65 shadow-lg backdrop-blur-xl">
-        单击 · 双击 · 单指拖动 · 长按右键 · 双指滚动
-      </p>
       <nav
         className="pointer-events-auto flex max-w-full items-end gap-1 overflow-visible rounded-[1.75rem] border border-white/15 bg-black/65 px-2.5 py-2.5 shadow-[0_16px_50px_rgb(0_0_0/35%)] backdrop-blur-2xl"
         aria-label="全屏控制"
@@ -254,7 +251,7 @@ export default function App() {
   const editRegion = (region: NormalizedRegion) => {
     setLayoutEditing(false);
     setEditingRegionId(region.id);
-    setDraftRegion(region);
+    setDraftRegion({ ...region, layout: region.layout ? { ...region.layout } : undefined });
     setDraftName(region.name);
     setEditing(true);
   };
@@ -365,6 +362,7 @@ export default function App() {
           {profile ? (
             editing ? (
               <RemoteCanvas
+                key={`crop-${editingRegionId ?? "new"}`}
                 target={selectedApp}
                 stream={stream}
                 onError={handleRemoteError}
@@ -413,7 +411,7 @@ export default function App() {
           <FullscreenDock>
             <DockAction label="应用画板" onClick={() => setViewMode("apps")}><Grid2X2 className="size-6" /></DockAction>
             <DockSeparator />
-            <DockAction label={selectedApp.appName || selectedApp.title} className="size-14 rounded-[1.15rem] bg-white p-1 hover:bg-white">
+            <DockAction label="返回完整应用" onClick={() => setViewMode("app")} className="size-14 rounded-[1.15rem] bg-white p-1 hover:bg-white">
               <AppIcon target={selectedApp} className="size-full rounded-[0.9rem]" />
             </DockAction>
             {profile?.regions.length ? (

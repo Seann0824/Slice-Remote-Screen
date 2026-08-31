@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent } from "react";
 import type { CanvasRect, NormalizedRegion, RemoteTarget } from "@slice/protocol";
 import { Button, cn } from "@slice/design-system";
-import { Crop, LocateFixed, Minus, Plus, Trash2 } from "lucide-react";
-import { FULL_REGION, RemoteCanvas, type RemoteInputChannel } from "./remote-canvas";
+import { ChevronLeft, ChevronRight, Crop, LocateFixed, Maximize2, Minimize2, Minus, Plus, RotateCw, Trash2 } from "lucide-react";
+import { RemoteCanvas, type RemoteInputChannel } from "./remote-canvas";
 import { hostApi } from "../api";
 import type { RemoteStream } from "./use-remote-stream";
 
@@ -16,6 +16,13 @@ type LayoutGesture = {
   initial: CanvasRect;
 };
 type PanGesture = { pointerId: number; startX: number; startY: number; initial: Camera };
+type PinchGesture = {
+  pointerIds: [number, number];
+  startDistance: number;
+  startCenterX: number;
+  startCenterY: number;
+  initial: Camera;
+};
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(maximum, Math.max(minimum, value));
@@ -63,11 +70,14 @@ export function RegionLayoutCanvas({
   const canvasRef = useRef<HTMLDivElement>(null);
   const layoutGestureRef = useRef<LayoutGesture | null>(null);
   const panGestureRef = useRef<PanGesture | null>(null);
+  const pinchGestureRef = useRef<PinchGesture | null>(null);
+  const touchPointsRef = useRef(new Map<number, { clientX: number; clientY: number }>());
   const layoutsRef = useRef<Record<string, CanvasRect>>(resolveLayouts(regions));
   const cameraRef = useRef<Camera>({ x: 0, y: 0, zoom: 1 });
   const [layouts, setLayouts] = useState(layoutsRef.current);
   const [camera, setCamera] = useState(cameraRef.current);
   const [activeRegionId, setActiveRegionId] = useState<string | null>(null);
+  const [focusedRegionId, setFocusedRegionId] = useState<string | null>(null);
   const [inputChannel, setInputChannel] = useState<RemoteInputChannel | null>(null);
 
   useEffect(() => {
@@ -76,7 +86,16 @@ export function RegionLayoutCanvas({
     setLayouts(next);
   }, [regions]);
 
-  useEffect(() => { if (!editing) setActiveRegionId(null); }, [editing]);
+  useEffect(() => {
+    if (!editing) setActiveRegionId(null);
+    if (editing) setFocusedRegionId(null);
+  }, [editing]);
+
+  useEffect(() => {
+    if (focusedRegionId && !regions.some((region) => region.id === focusedRegionId)) {
+      setFocusedRegionId(null);
+    }
+  }, [focusedRegionId, regions]);
 
   useEffect(() => {
     const channel = hostApi.inputStream(target, onError);
@@ -111,13 +130,36 @@ export function RegionLayoutCanvas({
     if (event.button !== 0 || (event.target as HTMLElement).closest("[data-canvas-control]")) return;
     const targetElement = event.target as HTMLElement;
     const item = targetElement.closest<HTMLElement>("[data-region-id]");
-    if (item && !editing) return;
-    if (targetElement.closest("[data-region-action]")) return;
     const regionId = item?.dataset.regionId;
     const layout = regionId ? layoutsRef.current[regionId] : null;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
+
+    if (event.pointerType === "touch") {
+      touchPointsRef.current.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
+      if (touchPointsRef.current.size === 2 && !focusedRegionId) {
+        const entries = [...touchPointsRef.current.entries()] as [[number, { clientX: number; clientY: number }], [number, { clientX: number; clientY: number }]];
+        const [[firstId, first], [secondId, second]] = entries;
+        pinchGestureRef.current = {
+          pointerIds: [firstId, secondId],
+          startDistance: Math.max(1, Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY)),
+          startCenterX: (first.clientX + second.clientX) / 2 - rect.left,
+          startCenterY: (first.clientY + second.clientY) / 2 - rect.top,
+          initial: cameraRef.current,
+        };
+        layoutGestureRef.current = null;
+        panGestureRef.current = null;
+        for (const pointerId of [firstId, secondId]) {
+          try { canvas.setPointerCapture(pointerId); } catch { /* Pointer may have ended between events. */ }
+        }
+        event.preventDefault();
+        return;
+      }
+    }
+
+    if (item && !editing) return;
+    if (targetElement.closest("[data-region-action]")) return;
 
     if (editing && regionId && layout) {
       layoutGestureRef.current = {
@@ -138,6 +180,29 @@ export function RegionLayoutCanvas({
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    if (event.pointerType === "touch" && touchPointsRef.current.has(event.pointerId)) {
+      touchPointsRef.current.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
+    }
+    const pinchGesture = pinchGestureRef.current;
+    if (pinchGesture) {
+      const first = touchPointsRef.current.get(pinchGesture.pointerIds[0]);
+      const second = touchPointsRef.current.get(pinchGesture.pointerIds[1]);
+      if (first && second) {
+        const rect = canvas.getBoundingClientRect();
+        const distance = Math.max(1, Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY));
+        const zoom = clamp(pinchGesture.initial.zoom * distance / pinchGesture.startDistance, 0.45, 2.5);
+        const ratio = zoom / pinchGesture.initial.zoom;
+        const centerX = (first.clientX + second.clientX) / 2 - rect.left;
+        const centerY = (first.clientY + second.clientY) / 2 - rect.top;
+        updateCamera({
+          zoom,
+          x: centerX - (pinchGesture.startCenterX - pinchGesture.initial.x) * ratio,
+          y: centerY - (pinchGesture.startCenterY - pinchGesture.initial.y) * ratio,
+        });
+      }
+      event.preventDefault();
+      return;
+    }
     const layoutGesture = layoutGestureRef.current;
     if (layoutGesture?.pointerId === event.pointerId) {
       const rect = canvas.getBoundingClientRect();
@@ -162,6 +227,13 @@ export function RegionLayoutCanvas({
   };
 
   const finishGesture = (event: ReactPointerEvent<HTMLDivElement>, cancelled = false) => {
+    touchPointsRef.current.delete(event.pointerId);
+    if (pinchGestureRef.current?.pointerIds.includes(event.pointerId)) {
+      pinchGestureRef.current = null;
+      layoutGestureRef.current = null;
+      panGestureRef.current = null;
+      return;
+    }
     const layoutGesture = layoutGestureRef.current;
     if (layoutGesture?.pointerId === event.pointerId) {
       layoutGestureRef.current = null;
@@ -180,6 +252,28 @@ export function RegionLayoutCanvas({
     }
   };
 
+  const focusRegion = (regionId: string | null) => {
+    setFocusedRegionId(regionId);
+    updateCamera({ x: 0, y: 0, zoom: 1 });
+  };
+
+  const switchFocusedRegion = (offset: number) => {
+    if (!focusedRegionId || regions.length < 2) return;
+    const currentIndex = regions.findIndex((region) => region.id === focusedRegionId);
+    const nextIndex = (currentIndex + offset + regions.length) % regions.length;
+    focusRegion(regions[nextIndex]!.id);
+  };
+
+  const rotateRegion = (regionId: string) => {
+    onCommit(regions.map((region) => region.id === regionId
+      ? { ...region, rotation: (((region.rotation ?? 0) + 90) % 360) as 0 | 90 | 180 | 270 }
+      : region));
+  };
+
+  const visibleRegions = focusedRegionId
+    ? regions.filter((region) => region.id === focusedRegionId)
+    : regions;
+
   return (
     <div
       ref={canvasRef}
@@ -189,6 +283,12 @@ export function RegionLayoutCanvas({
         editing && "bg-selected",
       )}
       aria-label="区域布局画布"
+      tabIndex={focusedRegionId ? 0 : undefined}
+      onKeyDown={(event) => {
+        if (!focusedRegionId || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+        event.preventDefault();
+        switchFocusedRegion(event.key === "ArrowLeft" ? -1 : 1);
+      }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={(event) => finishGesture(event)}
@@ -196,13 +296,13 @@ export function RegionLayoutCanvas({
       onLostPointerCapture={(event) => finishGesture(event, true)}
       onWheel={handleWheel}
     >
-      <div className="pointer-events-none absolute inset-0">
-        <RemoteCanvas target={target} stream={stream} region={FULL_REGION} onError={onError} showStatus={false} fillContainer disabled />
-      </div>
       <div className="absolute inset-0 origin-top-left" style={{ transform: `translate3d(${camera.x}px, ${camera.y}px, 0) scale(${camera.zoom})` }}>
-        {regions.map((region, index) => {
+        {visibleRegions.map((region, index) => {
           const layout = layouts[region.id];
           if (!layout) return null;
+          const displayLayout = focusedRegionId
+            ? { x: 0.02, y: 0.02, width: 0.96, height: 0.86 }
+            : layout;
           return (
             <section
               key={region.id}
@@ -214,8 +314,8 @@ export function RegionLayoutCanvas({
               data-region-id={region.id}
               aria-label={`${region.name} 布局区域`}
               style={{
-                left: `${layout.x * 100}%`, top: `${layout.y * 100}%`,
-                width: `${layout.width * 100}%`, height: `${layout.height * 100}%`,
+                left: `${displayLayout.x * 100}%`, top: `${displayLayout.y * 100}%`,
+                width: `${displayLayout.width * 100}%`, height: `${displayLayout.height * 100}%`,
                 zIndex: activeRegionId === region.id ? regions.length + 1 : index + 1,
               }}
             >
@@ -228,12 +328,27 @@ export function RegionLayoutCanvas({
                 fillContainer
                 disabled={editing}
                 inputChannel={inputChannel}
+                allowMultiTouchScroll={Boolean(focusedRegionId)}
               />
-              <p className="pointer-events-none absolute left-2 top-2 max-w-[calc(100%-4rem)] truncate rounded-full bg-overlay/90 px-2 py-1 text-label font-medium text-ink shadow-overlay">{region.name}</p>
+              <p className="pointer-events-none absolute left-2 top-2 max-w-[calc(100%-7rem)] truncate rounded-full bg-overlay/90 px-2 py-1 text-label font-medium text-ink shadow-overlay">{region.name}</p>
               {editing ? (
                 <div className="absolute right-2 top-2 flex gap-1" data-region-action>
+                  <Button size="icon-sm" variant="secondary" aria-label={`旋转${region.name}`} onClick={() => rotateRegion(region.id)}><RotateCw data-icon="inline-start" /></Button>
                   <Button size="icon-sm" variant="secondary" aria-label={`调整${region.name}取景`} onClick={() => onEditCrop(region)}><Crop data-icon="inline-start" /></Button>
                   <Button size="icon-sm" variant="danger" aria-label={`删除${region.name}`} onClick={() => onRemove(region.id)}><Trash2 data-icon="inline-start" /></Button>
+                </div>
+              ) : null}
+              {!editing ? (
+                <div className="absolute right-2 top-2 flex gap-1" data-region-action>
+                  <Button size="icon-sm" variant="secondary" aria-label={`旋转${region.name}`} onClick={() => rotateRegion(region.id)}><RotateCw /></Button>
+                  <Button
+                    size="icon-sm"
+                    variant="secondary"
+                    aria-label={focusedRegionId ? `退出${region.name}聚焦` : `聚焦${region.name}`}
+                    onClick={() => focusRegion(focusedRegionId ? null : region.id)}
+                  >
+                    {focusedRegionId ? <Minimize2 /> : <Maximize2 />}
+                  </Button>
                 </div>
               ) : null}
               {editing ? (
@@ -245,6 +360,19 @@ export function RegionLayoutCanvas({
           );
         })}
       </div>
+      {focusedRegionId ? (
+        <div
+          className="absolute left-1/2 top-3 z-50 flex -translate-x-1/2 items-center gap-1 rounded-control bg-overlay/95 p-1 shadow-overlay backdrop-blur"
+          data-canvas-control
+        >
+          <Button size="icon-sm" variant="ghost" aria-label="上一个区域" onClick={() => switchFocusedRegion(-1)} disabled={regions.length < 2}><ChevronLeft /></Button>
+          <span className="min-w-20 max-w-40 truncate px-2 text-center text-xs font-medium text-ink">
+            {regions.findIndex((region) => region.id === focusedRegionId) + 1}/{regions.length} · {regions.find((region) => region.id === focusedRegionId)?.name}
+          </span>
+          <Button size="icon-sm" variant="ghost" aria-label="下一个区域" onClick={() => switchFocusedRegion(1)} disabled={regions.length < 2}><ChevronRight /></Button>
+          <Button size="icon-sm" variant="ghost" aria-label="旋转当前区域" onClick={() => rotateRegion(focusedRegionId)}><RotateCw /></Button>
+        </div>
+      ) : null}
       <div
         className={cn(
           "absolute right-3 flex gap-1 rounded-control bg-overlay/95 p-1 shadow-overlay backdrop-blur",
@@ -256,12 +384,6 @@ export function RegionLayoutCanvas({
         <Button size="icon-sm" variant="ghost" aria-label="重置画布视图" onClick={() => updateCamera({ x: 0, y: 0, zoom: 1 })}><LocateFixed /></Button>
         <Button size="icon-sm" variant="ghost" aria-label="放大画布" onClick={() => zoomAround(cameraRef.current.zoom * 1.2)}><Plus /></Button>
       </div>
-      <p className={cn(
-        "pointer-events-none absolute left-4 max-w-[calc(100%-10rem)] rounded-full bg-overlay/90 px-3 py-1.5 text-xs text-muted shadow-overlay",
-        fullScreen ? "bottom-[max(6rem,calc(env(safe-area-inset-bottom)+5rem))]" : "bottom-4",
-      )}>
-        空白平移 · 区域内直控 · {Math.round(camera.zoom * 100)}%
-      </p>
     </div>
   );
 }

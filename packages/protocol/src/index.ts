@@ -45,6 +45,7 @@ export const normalizedRegionSchema = normalizedRectSchema.and(z.object({
   id: z.string().min(1),
   name: z.string().trim().min(1).max(80),
   layout: canvasRectSchema.optional(),
+  rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]).default(0),
 }));
 export type NormalizedRegion = z.infer<typeof normalizedRegionSchema>;
 
@@ -104,6 +105,11 @@ export const pointerControlSchema = z.discriminatedUnion("type", [
   pointerControlPointSchema.extend({ type: z.literal("down"), button: pointerButtonSchema.default("left") }),
   pointerControlPointSchema.extend({ type: z.literal("move") }),
   pointerControlPointSchema.extend({ type: z.literal("up") }),
+  pointerControlPointSchema.extend({
+    type: z.literal("click"),
+    button: pointerButtonSchema.default("left"),
+    clickCount: z.number().int().min(1).max(2).default(1),
+  }),
 ]);
 export type PointerControl = z.infer<typeof pointerControlSchema>;
 
@@ -150,12 +156,35 @@ export function appKey(target: Pick<RemoteTarget, "appName" | "bundleIdentifier"
 }
 
 export function mapRegionPoint(
-  region: Pick<NormalizedRegion, "x" | "y" | "width" | "height">,
+  region: Pick<NormalizedRegion, "x" | "y" | "width" | "height"> & { rotation?: 0 | 90 | 180 | 270 },
   localX: number,
   localY: number,
 ) {
+  const [sourceX, sourceY] = inverseRotatePoint(localX, localY, region.rotation ?? 0);
   return {
-    x: region.x + localX * region.width,
-    y: region.y + localY * region.height,
+    x: region.x + sourceX * region.width,
+    y: region.y + sourceY * region.height,
   };
+}
+
+export function mapRegionDelta(
+  rotation: 0 | 90 | 180 | 270,
+  deltaX: number,
+  deltaY: number,
+) {
+  switch (rotation) {
+    case 90: return { deltaX: deltaY, deltaY: -deltaX };
+    case 180: return { deltaX: -deltaX, deltaY: -deltaY };
+    case 270: return { deltaX: -deltaY, deltaY: deltaX };
+    default: return { deltaX, deltaY };
+  }
+}
+
+function inverseRotatePoint(x: number, y: number, rotation: 0 | 90 | 180 | 270) {
+  switch (rotation) {
+    case 90: return [y, 1 - x] as const;
+    case 180: return [1 - x, 1 - y] as const;
+    case 270: return [1 - y, x] as const;
+    default: return [x, y] as const;
+  }
 }

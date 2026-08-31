@@ -277,8 +277,23 @@ webSocketServer.on("connection", (webSocket) => {
       if (request.mode === "input") {
         nativeProcess = nativeHost.inputStream(request.kind, request.id);
         let standardError = "";
+        let standardOutput = "";
         nativeProcess.stderr.on("data", (chunk: Buffer) => {
           standardError = (standardError + chunk.toString("utf8")).slice(-4_096);
+        });
+        nativeProcess.stdout.on("data", (chunk: Buffer) => {
+          standardOutput += chunk.toString("utf8");
+          const lines = standardOutput.split("\n");
+          standardOutput = lines.pop() || "";
+          for (const line of lines) {
+            if (!line.trim() || webSocket.readyState !== WebSocket.OPEN) continue;
+            try {
+              const message = JSON.parse(line);
+              if (message?.type === "input-target") webSocket.send(JSON.stringify(message));
+            } catch {
+              // Ignore malformed native status lines; stderr carries operation failures.
+            }
+          }
         });
         nativeProcess.on("error", (error) => {
           if (webSocket.readyState === WebSocket.OPEN) {

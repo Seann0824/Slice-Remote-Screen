@@ -134,11 +134,16 @@ export const hostApi = {
       socket?.close();
     };
   },
-  inputStream(target: RemoteTarget, onError: (message: string) => void) {
+  inputStream(
+    target: RemoteTarget,
+    onError: (message: string) => void,
+    onInputTarget?: (editable: boolean) => void,
+  ) {
     let socket: WebSocket | null = null;
     let stopped = false;
     let ready = false;
     const queue: PointerControl[] = [];
+    const inputTargetListeners = new Set<(editable: boolean) => void>();
 
     const send = (control: PointerControl) => {
       if (ready && socket?.readyState === WebSocket.OPEN) {
@@ -158,6 +163,10 @@ export const hostApi = {
         if (message.type === "ready") {
           ready = true;
           for (const control of queue.splice(0)) send(control);
+        } else if (message.type === "input-target") {
+          const editable = Boolean((message as { editable?: boolean }).editable);
+          onInputTarget?.(editable);
+          for (const listener of inputTargetListeners) listener(editable);
         } else if (message.type === "error") {
           onError(message.message || "实时输入通道异常");
         }
@@ -174,10 +183,15 @@ export const hostApi = {
 
     return {
       send,
+      subscribeInputTarget(listener: (editable: boolean) => void) {
+        inputTargetListeners.add(listener);
+        return () => { inputTargetListeners.delete(listener); };
+      },
       close() {
         stopped = true;
         ready = false;
         queue.length = 0;
+        inputTargetListeners.clear();
         socket?.close();
       },
     };

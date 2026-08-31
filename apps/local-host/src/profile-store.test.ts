@@ -23,6 +23,7 @@ describe("ProfileStore", () => {
       bundleIdentifier: "com.openai.codex",
       regions: [{
         id: "composer", name: "输入区", x: 0.1, y: 0.7, width: 0.8, height: 0.2,
+        rotation: 0 as const,
         layout: { x: 0.04, y: 0.58, width: 0.92, height: 0.38 },
       }],
     };
