@@ -11,7 +11,7 @@ import {
 import type { InstalledApp } from "@slice/protocol";
 import { Button, cn, Input } from "@slice/design-system";
 import { AppIcon } from "./app-icon";
-import { Monitor, Search, Trash2, X } from "lucide-react";
+import { ArrowLeft, Monitor, Search, Trash2, X } from "lucide-react";
 
 type Point = { x: number; y: number };
 type CameraBounds = { minX: number; maxX: number; minY: number; maxY: number };
@@ -222,6 +222,7 @@ export function AppHoneycomb({
   onSelect,
   onCloseApp,
   onOpenDesktop,
+  onExit,
   displayAvailable = false,
   fullScreen = false,
 }: {
@@ -229,6 +230,7 @@ export function AppHoneycomb({
   onSelect: (app: InstalledApp) => void | Promise<void>;
   onCloseApp: (app: InstalledApp) => void | Promise<void>;
   onOpenDesktop?: () => void;
+  onExit?: () => void;
   displayAvailable?: boolean;
   fullScreen?: boolean;
 }) {
@@ -631,6 +633,21 @@ export function AppHoneycomb({
               className="pointer-events-auto flex max-w-full items-end gap-1.5 overflow-x-auto overflow-y-visible rounded-[1.75rem] border border-white/20 bg-black/55 px-2.5 py-2.5 shadow-[0_18px_60px_rgb(0_0_0/45%)] backdrop-blur-2xl"
               aria-label="全局远程控制"
             >
+              {onExit ? (
+                <>
+                  <Button
+                    className="group relative size-12 shrink-0 rounded-[1rem] border border-white/10 bg-white/10 text-white shadow-lg transition-transform hover:-translate-y-1 hover:bg-white/20"
+                    size="icon"
+                    variant="ghost"
+                    aria-label="返回拾文"
+                    title="返回拾文"
+                    onClick={onExit}
+                  >
+                    <ArrowLeft className="size-6" />
+                  </Button>
+                  <span className="mx-1 h-10 w-px shrink-0 bg-white/25" aria-hidden="true" />
+                </>
+              ) : null}
               {dockApps.map((app) => (
                 <Button
                   key={app.appKey}

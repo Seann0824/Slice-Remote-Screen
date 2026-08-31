@@ -26,6 +26,13 @@ const nativeHost = new NativeHost(config.nativeBinary);
 const profileStore = new ProfileStore(config.profilePath);
 const appIconCache = new Map<string, Promise<Buffer>>();
 const apiPrefix = "/api";
+const remoteMountPath = "/remote";
+
+function stripRemoteMountPath(pathname: string) {
+  if (pathname === remoteMountPath) return "/";
+  if (pathname.startsWith(`${remoteMountPath}/`)) return pathname.slice(remoteMountPath.length);
+  return pathname;
+}
 
 function sendJson(response: ServerResponse, status: number, value: unknown) {
   response.writeHead(status, {
@@ -193,6 +200,7 @@ const mimeTypes: Record<string, string> = {
   ".json": "application/json; charset=utf-8",
   ".png": "image/png",
   ".svg": "image/svg+xml",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
 async function handleStatic(response: ServerResponse, pathname: string) {
@@ -216,9 +224,10 @@ async function handleStatic(response: ServerResponse, pathname: string) {
   }
 
   const body = await readFile(filePath);
+  const isMutableShell = filePath.endsWith("index.html") || filePath.endsWith(".webmanifest");
   response.writeHead(200, {
     ...securityHeaders,
-    "Cache-Control": filePath.endsWith("index.html") ? "no-cache" : "public, max-age=31536000, immutable",
+    "Cache-Control": isMutableShell ? "no-cache" : "public, max-age=31536000, immutable",
     "Content-Type": mimeTypes[extname(filePath)] || "application/octet-stream",
   });
   response.end(body);
@@ -227,6 +236,7 @@ async function handleStatic(response: ServerResponse, pathname: string) {
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+    url.pathname = stripRemoteMountPath(url.pathname);
     if (url.pathname.startsWith(apiPrefix)) {
       await handleApi(request, response, url);
     } else {
@@ -249,6 +259,7 @@ const webSocketServer = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (request, socket, head) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+  url.pathname = stripRemoteMountPath(url.pathname);
   if (url.pathname !== "/api/stream") {
     socket.destroy();
     return;
@@ -258,8 +269,9 @@ server.on("upgrade", (request, socket, head) => {
   });
 });
 
-webSocketServer.on("connection", (webSocket) => {
+webSocketServer.on("connection", (webSocket, request) => {
   let nativeProcess: ReturnType<NativeHost["stream"]> | null = null;
+  const handshakeAuthorized = isAuthorized(request, config.token);
   const authenticationTimeout = setTimeout(() => {
     webSocket.close(4401, "Authentication timeout");
   }, 5_000);
@@ -268,7 +280,7 @@ webSocketServer.on("connection", (webSocket) => {
     try {
       if (isBinary) throw new Error("Expected a JSON stream request");
       const request = streamRequestSchema.parse(JSON.parse(rawMessage.toString()));
-      if (!tokenMatches(request.token, config.token)) {
+      if (!handshakeAuthorized && !tokenMatches(request.token, config.token)) {
         webSocket.close(4401, "Unauthorized");
         return;
       }
@@ -370,12 +382,12 @@ webSocketServer.on("connection", (webSocket) => {
 
 server.listen(config.port, config.bindHost, () => {
   const suffix = config.token ? `?token=${encodeURIComponent(config.token)}` : "";
-  console.log(`Slice Remote Screen: http://${config.bindHost}:${config.port}/${suffix}`);
+  console.log(`Slice Remote Screen: http://${config.bindHost}:${config.port}${remoteMountPath}/${suffix}`);
   if (config.bindHost === "0.0.0.0") {
     for (const addresses of Object.values(networkInterfaces())) {
       for (const address of addresses || []) {
         if (address.family === "IPv4" && !address.internal) {
-          console.log(`LAN: http://${address.address}:${config.port}/${suffix}`);
+          console.log(`LAN: http://${address.address}:${config.port}${remoteMountPath}/${suffix}`);
         }
       }
     }

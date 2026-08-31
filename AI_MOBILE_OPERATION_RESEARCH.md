@@ -661,6 +661,30 @@ AI 原型可以继续使用当前按需 PNG 和 15fps JPEG 流，但这不代表
 
 不能因为 AI 只需要截图，就把 WebRTC 优先级降掉。AI 和人类远控解决的是两种延迟需求。
 
+### 公网与 macOS 锁屏
+
+目标电脑只会锁屏、不会进入系统睡眠，因此不需要 Wake-on-LAN、Bonjour Sleep Proxy 或局域网常驻唤醒设备。Host 在锁屏后仍保持出站连接，公网链路应采用：
+
+```text
+Mac Host ──主动出站──> 云端信令 / 会话服务 <── 手机
+   └──────── WebRTC 直连，失败时走 TURN ────────┘
+```
+
+禁止把本地 `4173`、VNC `5900` 或其他控制端口直接映射到公网。WebRTC 在 NAT 下通常需要 STUN/TURN，TURN 账号必须使用短期凭证。参考：[WebRTC TURN](https://webrtc.org/getting-started/turn-server)。
+
+锁屏需要单独处理：
+
+1. Host 检测当前会话是否锁定；
+2. 调用 `IOPMAssertionDeclareUserActivity` 点亮显示器；
+3. 普通 ScreenCaptureKit / CGEvent 通道暂停，手机进入“解锁 Mac”界面；
+4. 通过端到端加密隧道桥接 macOS Screen Sharing / Remote Management 登录通道；
+5. 用户在手机端完成系统认证；
+6. 解锁后立即销毁登录通道，恢复 Slice 的 ScreenCaptureKit + CGEvent 快速路径。
+
+macOS 的 Screen Sharing / Remote Management 支持远程查看和控制，并兼容 VNC。Apple 同时明确警告第三方 VNC 可能不加密按键且权限接近完全控制，因此只能放在 Slice 的端到端加密隧道内，不能裸露到局域网或公网，也不能复用本机账户密码作为 VNC 密码。参考：[开启屏幕共享](https://support.apple.com/guide/mac-help/-mh11848/mac)、[VNC 安全警告](https://support.apple.com/guide/remote-desktop/virtual-network-computing-access-and-control-apde0dd523e/mac)。
+
+认证材料只允许保存在 Mac Keychain 或由用户在当次会话输入；云端不得保存 macOS 密码、VNC 密码或解锁画面。FileVault 启动前登录仍不在支持范围内，但本方案假设电脑不会重启或睡眠。
+
 ## 15. 实施路线
 
 ### P0：远程触控补全，2—4 天
@@ -685,6 +709,8 @@ AI 原型可以继续使用当前按需 PNG 和 15fps JPEG 流，但这不代表
 - 点击、按键和抬起事件可靠有序；
 - 视频帧、目标 geometry 和输入事件携带可关联时间戳；
 - 验证局域网和 TURN 中继下的触控延迟。
+- Host 使用主动出站连接注册设备，不开放家庭网络入站端口；
+- 增加锁屏检测、点亮显示器和加密的 Screen Sharing 登录通道原型。
 
 退出条件：局域网内的普通点击反馈接近本地触控体验，连续拖拽和滚动没有明显断裂或积压。
 

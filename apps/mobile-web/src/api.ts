@@ -12,6 +12,7 @@ import {
   type PointerGesture,
   type RemoteTarget,
 } from "@slice/protocol";
+import { remotePath, remoteWebSocketUrl } from "./base-path";
 
 const TOKEN_KEY = "slice-remote-screen.session-token";
 
@@ -33,7 +34,7 @@ async function request(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
   if (init.body) headers.set("Content-Type", "application/json");
-  const response = await fetch(path, { ...init, headers, cache: "no-store" });
+  const response = await fetch(remotePath(path), { ...init, headers, cache: "no-store" });
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { error?: string; detail?: string } | null;
     throw new Error(payload?.detail || payload?.error || `Request failed: ${response.status}`);
@@ -93,8 +94,7 @@ export const hostApi = {
     const connect = () => {
       if (stopped) return;
       callbacks.onState(socket ? "reconnecting" : "connecting");
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(`${protocol}//${window.location.host}/api/stream`);
+      socket = new WebSocket(remoteWebSocketUrl("/api/stream"));
       socket.binaryType = "blob";
       socket.addEventListener("open", () => {
         socket?.send(JSON.stringify({ token, kind: target.kind, id: target.id }));
@@ -142,6 +142,8 @@ export const hostApi = {
     let socket: WebSocket | null = null;
     let stopped = false;
     let ready = false;
+    let reconnectTimer: number | null = null;
+    let reconnectAttempts = 0;
     const queue: PointerControl[] = [];
     const inputTargetListeners = new Set<(editable: boolean) => void>();
 
@@ -149,37 +151,64 @@ export const hostApi = {
       if (ready && socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(control));
       } else if (!stopped) {
-        queue.push(control);
+        if (control.type === "move" && queue.at(-1)?.type === "move") queue[queue.length - 1] = control;
+        else queue.push(control);
+        if (queue.length > 64) queue.splice(0, queue.length - 64);
       }
     };
 
-    socket = new WebSocket(`${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/api/stream`);
-    socket.addEventListener("open", () => {
-      socket?.send(JSON.stringify({ token, kind: target.kind, id: target.id, mode: "input" }));
-    });
-    socket.addEventListener("message", (event) => {
-      try {
-        const message = JSON.parse(String(event.data)) as { type?: string; message?: string };
-        if (message.type === "ready") {
-          ready = true;
-          for (const control of queue.splice(0)) send(control);
-        } else if (message.type === "input-target") {
-          const editable = Boolean((message as { editable?: boolean }).editable);
-          onInputTarget?.(editable);
-          for (const listener of inputTargetListeners) listener(editable);
-        } else if (message.type === "error") {
-          onError(message.message || "实时输入通道异常");
+    const scheduleReconnect = () => {
+      if (stopped || reconnectTimer !== null) return;
+      const delay = Math.min(2_000, 250 * 2 ** Math.min(reconnectAttempts, 3));
+      reconnectAttempts += 1;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, delay);
+    };
+
+    const connect = () => {
+      if (stopped) return;
+      ready = false;
+      const current = new WebSocket(remoteWebSocketUrl("/api/stream"));
+      socket = current;
+      current.addEventListener("open", () => {
+        if (socket !== current || stopped) return;
+        current.send(JSON.stringify({ token, kind: target.kind, id: target.id, mode: "input" }));
+      });
+      current.addEventListener("message", (event) => {
+        if (socket !== current || stopped) return;
+        try {
+          const message = JSON.parse(String(event.data)) as { type?: string; message?: string };
+          if (message.type === "ready") {
+            ready = true;
+            reconnectAttempts = 0;
+            for (const control of queue.splice(0)) send(control);
+          } else if (message.type === "input-target") {
+            const editable = Boolean((message as { editable?: boolean }).editable);
+            onInputTarget?.(editable);
+            for (const listener of inputTargetListeners) listener(editable);
+          } else if (message.type === "error") {
+            ready = false;
+            current.close(1011, "Input process failed");
+          }
+        } catch {
+          onError("实时输入通道返回了无效消息");
         }
-      } catch {
-        onError("实时输入通道返回了无效消息");
-      }
-    });
-    socket.addEventListener("error", () => {
-      if (!stopped) onError("无法连接实时输入通道");
-    });
-    socket.addEventListener("close", (event) => {
-      if (!stopped && event.code !== 1000) onError("实时输入通道已断开");
-    });
+      });
+      current.addEventListener("error", () => {
+        // The close event performs a bounded reconnect. A transient input failure
+        // must not poison the global video/error state.
+      });
+      current.addEventListener("close", () => {
+        if (socket !== current || stopped) return;
+        ready = false;
+        queue.length = 0;
+        scheduleReconnect();
+      });
+    };
+
+    connect();
 
     return {
       send,
@@ -190,6 +219,7 @@ export const hostApi = {
       close() {
         stopped = true;
         ready = false;
+        if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
         queue.length = 0;
         inputTargetListeners.clear();
         socket?.close();

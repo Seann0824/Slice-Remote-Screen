@@ -13,6 +13,7 @@ import {
   Input,
 } from "@slice/design-system";
 import {
+  ArrowLeft,
   Check,
   CircleAlert,
   Grid2X2,
@@ -20,6 +21,7 @@ import {
   PanelsTopLeft,
   Plus,
   Scan,
+  X,
 } from "lucide-react";
 import { hostApi } from "./api";
 import { AppHoneycomb } from "./components/app-honeycomb";
@@ -119,6 +121,22 @@ function FullscreenDock({ children }: { children: ReactNode }) {
   );
 }
 
+function ErrorNotice({ message, onDismiss, floating = false }: { message: string; onDismiss: () => void; floating?: boolean }) {
+  return (
+    <Alert
+      className={floating ? "absolute inset-x-4 top-[max(5rem,env(safe-area-inset-top))] z-[10000] mx-auto max-w-md pr-12 shadow-overlay" : "pr-12"}
+      variant="destructive"
+    >
+      <CircleAlert />
+      <AlertTitle>操作失败</AlertTitle>
+      <AlertDescription>{message}</AlertDescription>
+      <Button className="absolute right-2 top-2" size="icon-sm" variant="ghost" aria-label="关闭错误提示" onClick={onDismiss}>
+        <X />
+      </Button>
+    </Alert>
+  );
+}
+
 export default function App() {
   const [permissions, setPermissions] = useState<HostPermissions | null>(null);
   const [targets, setTargets] = useState<RemoteTarget[]>([]);
@@ -135,6 +153,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [savingProfile, setSavingProfile] = useState(false);
   const handleRemoteError = useCallback((message: string) => setError(message), []);
+  const exitToShiwen = useCallback(() => window.location.assign("/"), []);
 
   const applicationTargets = useMemo(() => pickApplicationTargets(targets), [targets]);
   const applicationCatalog = useMemo(() => sortApplications(installedApps.map((app) => ({
@@ -318,19 +337,11 @@ export default function App() {
       ) : null}
 
       {canvasView && error ? (
-        <Alert className="absolute inset-x-4 top-[max(5rem,env(safe-area-inset-top))] z-30 mx-auto max-w-md shadow-overlay" variant="destructive">
-          <CircleAlert />
-          <AlertTitle>操作失败</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
+        <ErrorNotice message={error} floating onDismiss={() => setError(null)} />
       ) : null}
 
       {!canvasView && error ? (
-        <Alert variant="destructive">
-          <CircleAlert />
-          <AlertTitle>操作失败</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
+        <ErrorNotice message={error} onDismiss={() => setError(null)} />
       ) : null}
 
       {viewMode === "apps" ? (
@@ -342,6 +353,7 @@ export default function App() {
               onSelect={selectApplication}
               onCloseApp={closeApplication}
               onOpenDesktop={() => setViewMode("desktop")}
+              onExit={exitToShiwen}
               displayAvailable={Boolean(displayTarget)}
               fullScreen
             />
@@ -409,6 +421,8 @@ export default function App() {
           ) : null}
 
           <FullscreenDock>
+            <DockAction label="返回拾文" onClick={exitToShiwen}><ArrowLeft className="size-6" /></DockAction>
+            <DockSeparator />
             <DockAction label="应用画板" onClick={() => setViewMode("apps")}><Grid2X2 className="size-6" /></DockAction>
             <DockSeparator />
             <DockAction label="返回完整应用" onClick={() => setViewMode("app")} className="size-14 rounded-[1.15rem] bg-white p-1 hover:bg-white">
@@ -421,7 +435,6 @@ export default function App() {
             ) : null}
             {!editing ? <DockAction label="添加区域" onClick={beginRegion}><Plus className="size-6" /></DockAction> : null}
           </FullscreenDock>
-          {error ? <Alert className="absolute inset-x-3 top-20 z-[10000]" variant="destructive"><CircleAlert /><AlertDescription>{error}</AlertDescription></Alert> : null}
         </section>
       ) : null}
 
@@ -430,6 +443,8 @@ export default function App() {
           <h2 id="app-heading" className="sr-only">{selectedApp.appName || selectedApp.title}</h2>
           <RemoteCanvas target={selectedApp} stream={stream} region={FULL_REGION} onError={handleRemoteError} fillViewport />
           <FullscreenDock>
+            <DockAction label="返回拾文" onClick={exitToShiwen}><ArrowLeft className="size-6" /></DockAction>
+            <DockSeparator />
             <DockAction label="应用画板" onClick={() => setViewMode("apps")}><Grid2X2 className="size-6" /></DockAction>
             <DockSeparator />
             <DockAction label={selectedApp.appName || selectedApp.title} className="size-14 rounded-[1.15rem] bg-white p-1 hover:bg-white">
@@ -437,7 +452,6 @@ export default function App() {
             </DockAction>
             <DockAction label="交互区域" onClick={() => setViewMode("regions")}><PanelsTopLeft className="size-6" /></DockAction>
           </FullscreenDock>
-          {error ? <Alert className="absolute inset-x-3 top-20" variant="destructive"><CircleAlert /><AlertDescription>{error}</AlertDescription></Alert> : null}
         </section>
       ) : null}
 
@@ -448,11 +462,12 @@ export default function App() {
             <RemoteCanvas target={displayTarget} stream={stream} onError={handleRemoteError} fillViewport />
           ) : <p className="text-body-sm text-muted">没有可用显示器。</p>}
           <FullscreenDock>
+            <DockAction label="返回拾文" onClick={exitToShiwen}><ArrowLeft className="size-6" /></DockAction>
+            <DockSeparator />
             <DockAction label="完整 App" onClick={() => setViewMode("app")}><Scan className="size-6" /></DockAction>
             <DockSeparator />
             <DockAction label="完整桌面" className="size-14 rounded-[1.15rem] bg-white/15 hover:bg-white/25"><Monitor className="size-6" /></DockAction>
           </FullscreenDock>
-          {error ? <Alert className="absolute inset-x-3 top-20" variant="destructive"><CircleAlert /><AlertDescription>{error}</AlertDescription></Alert> : null}
         </section>
       ) : null}
 

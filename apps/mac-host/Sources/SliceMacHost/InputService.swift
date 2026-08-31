@@ -89,8 +89,7 @@ enum InputService {
                     button: request.button ?? "left",
                     clickCount: min(max(request.clickCount ?? 1, 1), 2)
                 )
-                try await Task.sleep(for: .milliseconds(45))
-                reportInputTarget(target)
+                try await reportInputTarget(target)
             case "down":
                 try await activate(target)
                 let button = request.button ?? "left"
@@ -124,8 +123,18 @@ enum InputService {
         )
     }
 
-    private static func reportInputTarget(_ target: ResolvedTarget) {
-        let editable = focusedElementIsEditable(target)
+    private static func reportInputTarget(_ target: ResolvedTarget) async throws {
+        for attempt in 0..<8 {
+            if focusedElementIsEditable(target) {
+                writeInputTarget(editable: true)
+                return
+            }
+            if attempt < 7 { try await Task.sleep(for: .milliseconds(50)) }
+        }
+        writeInputTarget(editable: false)
+    }
+
+    private static func writeInputTarget(editable: Bool) {
         guard let data = try? JSONSerialization.data(withJSONObject: [
             "type": "input-target",
             "editable": editable,
@@ -145,11 +154,26 @@ enum InputService {
         ) == .success,
         let rawFocusedElement,
         CFGetTypeID(rawFocusedElement) == AXUIElementGetTypeID() else { return false }
-        let focusedElement = rawFocusedElement as! AXUIElement
+        var element = rawFocusedElement as! AXUIElement
+        for _ in 0..<6 {
+            if elementIsEditable(element) { return true }
+            var rawParent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(
+                element,
+                kAXParentAttribute as CFString,
+                &rawParent
+            ) == .success,
+            let rawParent,
+            CFGetTypeID(rawParent) == AXUIElementGetTypeID() else { break }
+            element = rawParent as! AXUIElement
+        }
+        return false
+    }
 
+    private static func elementIsEditable(_ element: AXUIElement) -> Bool {
         var rawRole: CFTypeRef?
         let role = AXUIElementCopyAttributeValue(
-            focusedElement,
+            element,
             kAXRoleAttribute as CFString,
             &rawRole
         ) == .success ? rawRole as? String : nil
@@ -164,7 +188,7 @@ enum InputService {
 
         var rawSubrole: CFTypeRef?
         let subrole = AXUIElementCopyAttributeValue(
-            focusedElement,
+            element,
             kAXSubroleAttribute as CFString,
             &rawSubrole
         ) == .success ? rawSubrole as? String : nil
@@ -173,12 +197,32 @@ enum InputService {
 
         var rawEditable: CFTypeRef?
         if AXUIElementCopyAttributeValue(
-            focusedElement,
+            element,
             kAXIsEditableAttribute as CFString,
             &rawEditable
         ) == .success,
         let editable = (rawEditable as? NSNumber)?.boolValue {
             return editable
+        }
+
+        var valueIsSettable = DarwinBoolean(false)
+        if AXUIElementIsAttributeSettable(
+            element,
+            kAXValueAttribute as CFString,
+            &valueIsSettable
+        ) == .success,
+        valueIsSettable.boolValue {
+            return true
+        }
+
+        var rawSelectedTextRange: CFTypeRef?
+        if AXUIElementCopyAttributeValue(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            &rawSelectedTextRange
+        ) == .success,
+        rawSelectedTextRange != nil {
+            return true
         }
         return false
     }

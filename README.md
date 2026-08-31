@@ -51,7 +51,7 @@ pnpm mvp
 如果以前只给 Terminal、Codex 或旧裸二进制授权，那份权限不算。必须给新的 `Slice Remote Screen Host.app` 授权。授权后完全退出 Host，再运行 `pnpm mvp`。打开：
 
 ```text
-http://127.0.0.1:4173
+http://127.0.0.1:4173/remote/
 ```
 
 ## 手机局域网访问
@@ -76,7 +76,18 @@ pnpm dev:api
 pnpm dev:web
 ```
 
-Vite 地址为 `http://127.0.0.1:5173`，`/api` 会代理到 `4173`。
+Vite 地址为 `http://127.0.0.1:5173/remote/`，`/remote/api` 会去掉挂载前缀后代理到
+`4173`。
+
+## 同域挂载
+
+控制台固定以 `/remote/` 为公开路径，可由拾文的 Caddy `handle_path` 转发到这个服务。
+`handle_path` 会在转发前去掉 `/remote`，本地 Host 同时也接受带前缀的直连请求。HTTP API、
+静态资源、manifest 和 WebSocket 都使用同一个前缀，不能只改首页路径。
+
+反向代理必须先验证拾文管理员会话，再使用仅存在于代理和 Host 环境中的 Token 给上游请求
+加 `Authorization: Bearer ...`。Host 的 WebSocket 握手也接受这个代理注入的 Bearer Token；
+浏览器不需要、也不应该拿到它。
 
 ## 验证
 

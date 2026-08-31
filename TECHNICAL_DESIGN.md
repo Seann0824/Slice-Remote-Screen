@@ -176,7 +176,76 @@ SCStream
 
 后续只有真实用户明确需要多个实时区域时，才增加多轨或服务端合成 atlas。
 
-### 5.4 输入路由
+### 5.4 后续考虑：多应用同画布
+
+Post-V1 可以支持一个远程画布同时呈现多个应用窗口，但这属于新的跨应用画布模型，不是给现有 `NormalizedRegion` 增加一个字段就结束。
+
+#### 目标模型
+
+```text
+CanvasProfile
+├── CanvasItem: Codex window
+├── CanvasItem: Terminal window
+├── CanvasItem: Browser window
+└── CanvasItem: Editor window
+```
+
+建议新增独立的 `CanvasProfile`：
+
+```json
+{
+  "version": 1,
+  "id": "canvas.dev-workspace",
+  "items": [
+    {
+      "id": "item.codex",
+      "source": {
+        "appKey": "com.openai.codex",
+        "bundleIdentifier": "com.openai.codex",
+        "windowMatcher": { "titleContains": "Codex" }
+      },
+      "crop": { "x": 0, "y": 0, "width": 1, "height": 1 },
+      "layout": { "x": 0.02, "y": 0.02, "width": 0.47, "height": 0.46 },
+      "zIndex": 1,
+      "mediaPolicy": "live"
+    }
+  ]
+}
+```
+
+#### 采集与合成
+
+- ScreenCaptureKit 支持枚举应用、窗口和显示器，并可用独立窗口创建内容过滤器；因此多窗口采集在 macOS 能力上可行。[Apple：ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit)
+- 正式架构使用独立 window source，不使用整屏流的固定像素裁剪作为多应用画布的基础。整屏裁剪无法稳定处理窗口遮挡、移动、跨 Space 和最小化。
+- 第一阶段可以在手机端合成 2–4 路低频 JPEG 流，当前聚焦项切换到高帧率流，用于验证产品需求。
+- 验证通过后，改为 Mac 端统一 `CanvasSession`：一个持久进程管理多路 `SCStream`，输出带 `sourceId` 的帧；再评估客户端多轨 WebRTC 或 host-side atlas。
+- 每个 source 必须有独立的在线、尺寸变化、窗口关闭和重新匹配状态，不能用另一窗口的旧画面冒充在线。
+
+#### 输入与焦点
+
+现有输入协议的坐标只有相对于单个 target 的 `x/y`。多应用画布需要改为：
+
+```json
+{
+  "type": "pointer.down",
+  "sourceId": "item.codex",
+  "x": 0.82,
+  "y": 0.44
+}
+```
+
+- pointer down 到 up 期间锁定 `sourceId`，避免拖拽过程中切换目标。
+- 点击画布项时激活并抬升对应窗口；键盘和文本输入只发给当前焦点项。
+- 语义操作优先使用 AXUIElement，像素级操作才使用 CGEvent；两个 API 都需要按目标应用验证。
+- 多应用“同时显示”可行，但 macOS 键盘焦点仍然是串行的，不能承诺多个应用同时接收键盘输入。
+
+#### 持久化与失效处理
+
+窗口 ID 只作为当前会话的寻址信息，不作为持久化身份。恢复画布时按 bundle identifier、窗口标题/角色和 Accessibility 层级重新匹配；匹配失败时单项显示失效状态，并提供重新绑定或展开完整应用窗口的入口。
+
+该能力暂不进入 V1 验收范围。进入实现前必须先验证：2–4 路窗口的 CPU、内存、带宽、手机端解码功耗、窗口切换延迟，以及点击/拖拽/键盘焦点不会误路由。
+
+### 5.5 输入路由
 
 输入协议使用归一化坐标：
 
@@ -213,7 +282,7 @@ Host 端执行以下转换：
 
 坐标转换应是纯函数并具备完整单元测试。这里出错会造成最危险的误操作。
 
-### 5.5 前台与后台输入
+### 5.6 前台与后台输入
 
 输入执行分三档：
 
