@@ -11,10 +11,11 @@ import {
   CardTitle,
   Input,
 } from "@slice/design-system";
-import { CircleAlert, MonitorUp } from "lucide-react";
+import { CircleAlert, MonitorUp, Unplug } from "lucide-react";
 import { hostApi } from "../api";
 
 type SignalMessage =
+  | { type: "host.accepted" }
   | { type: "peer.ready" }
   | { type: "peer.left" }
   | { type: "signal.offer"; sdp: string }
@@ -27,17 +28,24 @@ type ControlMessage =
   | { type: "key"; value: KeyRequest };
 
 const iceServers: RTCIceServer[] = [{ urls: "stun:stun.cloudflare.com:3478" }];
+const credentialStorageKey = "shiwen-remote-host-token-v1";
 
 function defaultSignalUrl() {
   const url = new URL(window.location.href);
-  return url.searchParams.get("server") || "wss://shiwhen.com/api/remote-control/signal";
+  return url.searchParams.get("server") || "wss://shiwhen.com/api/remote-control/host";
+}
+
+function initialCredential() {
+  const urlToken = new URL(window.location.href).searchParams.get("token");
+  return urlToken || window.localStorage.getItem(credentialStorageKey) || "";
 }
 
 export function P2pHostScreen() {
-  const [token, setToken] = useState(
-    () => new URL(window.location.href).searchParams.get("pair") || "",
+  const [token, setToken] = useState(initialCredential);
+  const [savedCredential, setSavedCredential] = useState(initialCredential);
+  const [status, setStatus] = useState(
+    token ? "正在自动向拾文报到…" : "粘贴一次 Mac 绑定密钥，之后会自动上线",
   );
-  const [status, setStatus] = useState("等待输入拾文生成的连接码");
   const [error, setError] = useState("");
   const [target, setTarget] = useState<RemoteTarget | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -45,6 +53,8 @@ export function P2pHostScreen() {
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const pendingCandidates = useRef<RTCIceCandidateInit[]>([]);
   const stopFramesRef = useRef<(() => void) | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const connectRef = useRef<(display: RemoteTarget, credential: string) => void>(() => undefined);
 
   useEffect(() => {
     let cancelled = false;
@@ -61,6 +71,7 @@ export function P2pHostScreen() {
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
     return () => {
       cancelled = true;
+      if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
       stopFramesRef.current?.();
       socketRef.current?.close(1000, "Host closed");
       peerRef.current?.close();
@@ -73,17 +84,20 @@ export function P2pHostScreen() {
     }
   }
 
-  async function control(message: ControlMessage) {
-    if (!target) return;
-    if (message.type === "gesture") await hostApi.gesture(target, message.value);
-    if (message.type === "type") await hostApi.type(target, message.text);
-    if (message.type === "key") await hostApi.key(target, message.value);
+  async function control(display: RemoteTarget, message: ControlMessage) {
+    if (message.type === "gesture") await hostApi.gesture(display, message.value);
+    if (message.type === "type") await hostApi.type(display, message.text);
+    if (message.type === "key") await hostApi.key(display, message.value);
   }
 
-  async function acceptOffer(message: Extract<SignalMessage, { type: "signal.offer" }>) {
+  async function acceptOffer(
+    display: RemoteTarget,
+    message: Extract<SignalMessage, { type: "signal.offer" }>,
+  ) {
     const canvas = canvasRef.current;
     if (!canvas) throw new Error("屏幕画面尚未准备好");
     peerRef.current?.close();
+    pendingCandidates.current = [];
     const peer = new RTCPeerConnection({ iceServers });
     peerRef.current = peer;
     const stream = canvas.captureStream(15);
@@ -99,9 +113,11 @@ export function P2pHostScreen() {
     };
     peer.ondatachannel = (event) => {
       event.channel.onmessage = (controlEvent) => {
-        void control(JSON.parse(String(controlEvent.data)) as ControlMessage).catch((reason) => {
-          setError(reason instanceof Error ? reason.message : String(reason));
-        });
+        void control(display, JSON.parse(String(controlEvent.data)) as ControlMessage).catch(
+          (reason) => {
+            setError(reason instanceof Error ? reason.message : String(reason));
+          },
+        );
       };
     };
     await peer.setRemoteDescription({ type: "offer", sdp: message.sdp });
@@ -114,10 +130,18 @@ export function P2pHostScreen() {
     sendSignal({ type: "signal.answer", sdp: answer.sdp });
   }
 
-  async function handleSignal(message: SignalMessage) {
+  async function handleSignal(display: RemoteTarget, message: SignalMessage) {
+    if (message.type === "host.accepted") {
+      setStatus("已向拾文报到，等待手机打开控制页");
+    }
     if (message.type === "peer.ready") setStatus("手机已就绪，正在协商连接");
-    if (message.type === "peer.left") throw new Error("手机已断开");
-    if (message.type === "signal.offer") await acceptOffer(message);
+    if (message.type === "peer.left") {
+      peerRef.current?.close();
+      peerRef.current = null;
+      pendingCandidates.current = [];
+      setStatus("已向拾文报到，等待手机打开控制页");
+    }
+    if (message.type === "signal.offer") await acceptOffer(display, message);
     if (message.type === "signal.ice") {
       if (peerRef.current?.remoteDescription) {
         await peerRef.current.addIceCandidate(message.candidate);
@@ -128,13 +152,13 @@ export function P2pHostScreen() {
   }
 
   function startFrames(display: RemoteTarget) {
+    if (stopFramesRef.current) return;
     const canvas = canvasRef.current;
     if (!canvas) throw new Error("屏幕画面尚未准备好");
     canvas.width = Math.max(1, Math.round(display.frame.width));
     canvas.height = Math.max(1, Math.round(display.frame.height));
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) throw new Error("无法创建画布");
-    stopFramesRef.current?.();
     stopFramesRef.current = hostApi.stream(display, {
       onState: () => undefined,
       onError: setError,
@@ -147,28 +171,77 @@ export function P2pHostScreen() {
     });
   }
 
-  function connect() {
-    if (!target || !token.trim()) {
-      setError("先输入连接码");
-      return;
+  function connect(display: RemoteTarget, credential: string) {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
     }
     setError("");
-    setStatus("正在连接拾文信令…");
-    startFrames(target);
-    socketRef.current?.close();
-    const query = new URLSearchParams({ token: token.trim(), role: "host" });
-    const socket = new WebSocket(`${defaultSignalUrl()}?${query}`);
+    setStatus("正在自动向拾文报到…");
+    startFrames(display);
+    socketRef.current?.close(1000, "Host reconnecting");
+    const socket = new WebSocket(defaultSignalUrl());
     socketRef.current = socket;
-    socket.onopen = () => setStatus("已提交连接码，等待手机");
+    let authenticated = false;
+    socket.onopen = () => {
+      setStatus("正在验证 Mac 绑定…");
+      socket.send(JSON.stringify({ type: "host.auth", token: credential }));
+    };
     socket.onmessage = (event) => {
-      void handleSignal(JSON.parse(String(event.data)) as SignalMessage).catch((reason) => {
+      const message = JSON.parse(String(event.data)) as SignalMessage;
+      if (message.type === "host.accepted") authenticated = true;
+      void handleSignal(display, message).catch((reason) => {
         setError(reason instanceof Error ? reason.message : String(reason));
       });
     };
-    socket.onerror = () => setError("连接码无效或信令服务不可用");
-    socket.onclose = (event) => {
-      if (event.code !== 1000) setError("信令连接已关闭");
+    socket.onerror = () => {
+      if (!authenticated) setError("绑定密钥无效或拾文信令服务不可用");
     };
+    socket.onclose = (event) => {
+      if (socketRef.current !== socket || event.code === 1000) return;
+      if (!authenticated) {
+        setStatus("绑定失败，请在拾文重新生成 Mac 绑定密钥");
+        return;
+      }
+      setStatus("与拾文断开，正在重连…");
+      reconnectTimerRef.current = window.setTimeout(
+        () => connectRef.current(display, credential),
+        3000,
+      );
+    };
+  }
+  connectRef.current = connect;
+
+  useEffect(() => {
+    if (target && savedCredential.trim()) {
+      connectRef.current(target, savedCredential.trim());
+    }
+  }, [savedCredential, target]);
+
+  function saveCredential() {
+    const credential = token.trim();
+    if (!credential) {
+      setError("先输入 Mac 绑定密钥");
+      return;
+    }
+    window.localStorage.setItem(credentialStorageKey, credential);
+    setToken(credential);
+    if (savedCredential === credential && target) {
+      connectRef.current(target, credential);
+    } else {
+      setSavedCredential(credential);
+    }
+  }
+
+  function clearCredential() {
+    window.localStorage.removeItem(credentialStorageKey);
+    setToken("");
+    setSavedCredential("");
+    socketRef.current?.close(1000, "Binding cleared");
+    peerRef.current?.close();
+    peerRef.current = null;
+    setError("");
+    setStatus("绑定已清除，请输入新的 Mac 绑定密钥");
   }
 
   return (
@@ -177,17 +250,25 @@ export function P2pHostScreen() {
         <CardHeader>
           <MonitorUp className="mb-2 size-8 text-muted" />
           <CardTitle>连接拾文</CardTitle>
-          <CardDescription>输入手机端生成的一次性连接码。</CardDescription>
+          <CardDescription>绑定一次后，这台 Mac 每次启动都会自动上线。</CardDescription>
         </CardHeader>
         <div className="flex flex-col gap-3 p-5 pt-0">
           <Input
+            type="password"
             value={token}
             onChange={(event) => setToken(event.target.value)}
-            placeholder="连接码"
+            placeholder="Mac 绑定密钥"
+            autoComplete="off"
           />
-          <Button onClick={connect} disabled={!target}>
-            建立点对点连接
+          <Button onClick={saveCredential} disabled={!target}>
+            保存并上线
           </Button>
+          {savedCredential ? (
+            <Button variant="danger" onClick={clearCredential}>
+              <Unplug />
+              清除绑定
+            </Button>
+          ) : null}
           <p className="m-0 text-body-sm text-muted" role="status">
             {status}
           </p>

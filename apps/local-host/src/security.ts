@@ -21,7 +21,7 @@ export function isAuthorized(request: IncomingMessage, expectedToken: string | n
 
 export const securityHeaders = {
   "Content-Security-Policy":
-    "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' wss://shiwhen.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' wss://shiwhen.com ws://127.0.0.1:8787; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",

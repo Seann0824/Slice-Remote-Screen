@@ -62,9 +62,10 @@ Mac 端继续运行 `pnpm mvp`，然后打开：
 http://127.0.0.1:4173/remote/?mode=host
 ```
 
-在拾文 `/remote` 生成一次性连接码，填到 Mac 页面。拾文服务器只转发 WebRTC offer、answer
-和 ICE，画面与控制数据通过 WebRTC 直接在手机和 Mac 之间传输。这里只使用 STUN 发现公网地址，
-没有 TURN、媒体中转、Docker 或额外服务。
+首次使用时，在拾文 `/remote` 生成 Mac 绑定密钥，填到 Mac 页面并点击“保存并上线”。密钥会保存
+在本机浏览器中；以后运行 `pnpm mvp` 并打开 Host 页面后，Mac 会自动向拾文报到，不需要再次输入。
+拾文服务器只转发 WebRTC offer、answer 和 ICE，画面与控制数据通过 WebRTC 直接在手机和 Mac
+之间传输。这里只使用 STUN 发现公网地址，没有 TURN、媒体中转、Docker 或额外服务。
 
 ## 手机局域网访问
 

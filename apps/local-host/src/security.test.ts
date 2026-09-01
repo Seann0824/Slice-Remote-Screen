@@ -23,5 +23,6 @@ describe("host exposure guard", () => {
 describe("host content security policy", () => {
   it("allows the Shiwen WebSocket signaling endpoint", () => {
     expect(securityHeaders["Content-Security-Policy"]).toContain("wss://shiwhen.com");
+    expect(securityHeaders["Content-Security-Policy"]).toContain("ws://127.0.0.1:8787");
   });
 });
