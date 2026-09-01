@@ -20,6 +20,20 @@ describe("host exposure guard", () => {
   });
 });
 
+describe("path configuration", () => {
+  it("resolves operator-provided relative paths from the process directory", () => {
+    const config = loadConfig({
+      SLICE_NATIVE_BINARY: "./host",
+      SLICE_WEB_ROOT: "./web",
+      SLICE_PROFILE_PATH: "./profiles.json",
+    });
+
+    expect(config.nativeBinary).toMatch(/^\//);
+    expect(config.webRoot).toMatch(/^\//);
+    expect(config.profilePath).toMatch(/^\//);
+  });
+});
+
 describe("host content security policy", () => {
   it("allows the Shiwen WebSocket signaling endpoint", () => {
     expect(securityHeaders["Content-Security-Policy"]).toContain("wss://shiwhen.com");

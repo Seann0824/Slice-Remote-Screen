@@ -2,15 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/.." && pwd)"
 
-export SLICE_HOST="0.0.0.0"
-export SLICE_TOKEN="${SLICE_TOKEN:-$(openssl rand -hex 16)}"
-
-cd "${repo_root}"
-pnpm build
-
-echo "Starting LAN host with token authentication."
-echo "Do not expose port 4173 to the public internet."
-exec pnpm --filter @slice/local-host start
-
+echo "启动局域网 Host（Bearer token 鉴权）。"
+echo "不要把 4173 端口暴露到公网；代码更新后请先运行 pnpm run bootstrap。"
+exec bash "${script_dir}/start.sh" --lan

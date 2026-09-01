@@ -3,6 +3,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
+const repositoryRoot = resolve(currentDirectory, "../../..");
+
+function resolveConfiguredPath(value: string | undefined, fallback: string) {
+  return value?.trim() ? resolve(repositoryRoot, value) : fallback;
+}
 
 export type HostConfig = {
   bindHost: string;
@@ -30,15 +35,17 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): HostCo
     bindHost,
     port,
     token,
-    nativeBinary:
-      environment.SLICE_NATIVE_BINARY ||
-      resolve(
-        currentDirectory,
-        "../../../dist/SliceRemoteScreenHost.app/Contents/MacOS/slice-mac-host",
-      ),
-    webRoot: environment.SLICE_WEB_ROOT || resolve(currentDirectory, "../../mobile-web/dist"),
-    profilePath:
-      environment.SLICE_PROFILE_PATH ||
+    nativeBinary: resolveConfiguredPath(
+      environment.SLICE_NATIVE_BINARY,
+      resolve(currentDirectory, "../../../dist/SliceRemoteScreenHost.app/Contents/MacOS/slice-mac-host"),
+    ),
+    webRoot: resolveConfiguredPath(
+      environment.SLICE_WEB_ROOT,
+      resolve(currentDirectory, "../../mobile-web/dist"),
+    ),
+    profilePath: resolveConfiguredPath(
+      environment.SLICE_PROFILE_PATH,
       join(homedir(), "Library", "Application Support", "Slice Remote Screen", "profiles.json"),
+    ),
   };
 }

@@ -20,6 +20,7 @@ import { LengthPrefixedFrameParser } from "./frame-protocol.js";
 import { NativeHost } from "./native-host.js";
 import { ProfileStore } from "./profile-store.js";
 import { isAuthorized, securityHeaders, tokenMatches } from "./security.js";
+import { APP_VERSION } from "./version.js";
 
 const config = loadConfig();
 const nativeHost = new NativeHost(config.nativeBinary);
@@ -28,6 +29,10 @@ const appIconCache = new Map<string, Promise<Buffer>>();
 const apiPrefix = "/api";
 const remoteMountPath = "/slice-remote";
 const remoteMountPaths = ["/remote", remoteMountPath];
+
+function requestUrl(request: IncomingMessage) {
+  return new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+}
 
 function stripRemoteMountPath(pathname: string) {
   for (const mountPath of remoteMountPaths) {
@@ -70,7 +75,7 @@ function parseTarget(pathname: string) {
 
 async function handleApi(request: IncomingMessage, response: ServerResponse, url: URL) {
   if (url.pathname === "/api/health" && request.method === "GET") {
-    sendJson(response, 200, { ok: true, version: "0.1.0", authenticated: Boolean(config.token) });
+    sendJson(response, 200, { ok: true, version: APP_VERSION, authenticated: Boolean(config.token) });
     return;
   }
 
@@ -238,7 +243,7 @@ async function handleStatic(response: ServerResponse, pathname: string) {
 
 const server = createServer(async (request, response) => {
   try {
-    const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+    const url = requestUrl(request);
     url.pathname = stripRemoteMountPath(url.pathname);
     if (url.pathname.startsWith(apiPrefix)) {
       await handleApi(request, response, url);
@@ -261,7 +266,7 @@ const streamRequestSchema = z.object({
 const webSocketServer = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (request, socket, head) => {
-  const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+  const url = requestUrl(request);
   url.pathname = stripRemoteMountPath(url.pathname);
   if (url.pathname !== "/api/stream") {
     socket.destroy();
@@ -396,3 +401,17 @@ server.listen(config.port, config.bindHost, () => {
     }
   }
 });
+
+function stopServer(signal: NodeJS.Signals) {
+  console.log(`收到 ${signal}，正在停止服务……`);
+  for (const client of webSocketServer.clients) client.close(1001, "Server shutting down");
+  server.close((error) => {
+    if (error) {
+      console.error("停止服务失败", error);
+      process.exitCode = 1;
+    }
+  });
+}
+
+process.once("SIGINT", () => stopServer("SIGINT"));
+process.once("SIGTERM", () => stopServer("SIGTERM"));

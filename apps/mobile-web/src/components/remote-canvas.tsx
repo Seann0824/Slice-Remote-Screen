@@ -165,8 +165,9 @@ export function RemoteCanvas({
       return;
     }
     if (mobilePointerRef.current) {
-      // Keep this focus in the original touch path when possible. Mobile Safari
-      // blocks a keyboard opened only from an asynchronous WebSocket callback.
+      // Do not focus the hidden input until the native host confirms that the
+      // remote click landed on an editable control. Eager focus opens the
+      // virtual keyboard for every canvas tap.
       mobileInputRef.current?.focus({ preventScroll: true });
     }
     mobilePointerRef.current = false;
@@ -289,7 +290,6 @@ export function RemoteCanvas({
     const channel = currentInputChannel();
     if (probeMobileInput) {
       mobilePointerRef.current = true;
-      mobileInputRef.current?.focus({ preventScroll: true });
       if (mobileInputProbeTimerRef.current !== null) window.clearTimeout(mobileInputProbeTimerRef.current);
       mobileInputProbeTimerRef.current = window.setTimeout(() => {
         mobileInputProbeTimerRef.current = null;
