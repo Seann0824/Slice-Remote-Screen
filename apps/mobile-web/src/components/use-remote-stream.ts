@@ -8,18 +8,28 @@ class FrameStore {
   readonly canvas = document.createElement("canvas");
   private listeners = new Set<() => void>();
   private decoding = false;
+  private pendingFrame: Blob | null = null;
 
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
-    return () => { this.listeners.delete(listener); };
+    return () => {
+      this.listeners.delete(listener);
+    };
   };
 
   push(frame: Blob, onReady: () => void, onError: (message: string) => void) {
+    this.pendingFrame = frame;
     if (this.decoding) return;
+    const nextFrame = this.pendingFrame;
+    this.pendingFrame = null;
+    if (!nextFrame) return;
     this.decoding = true;
-    void createImageBitmap(frame)
+    void createImageBitmap(nextFrame)
       .then((bitmap) => {
-        if (this.canvas.width !== bitmap.width || this.canvas.height !== bitmap.height) {
+        if (
+          this.canvas.width !== bitmap.width ||
+          this.canvas.height !== bitmap.height
+        ) {
           this.canvas.width = bitmap.width;
           this.canvas.height = bitmap.height;
         }
@@ -28,8 +38,14 @@ class FrameStore {
         onReady();
         this.listeners.forEach((listener) => listener());
       })
-      .catch((error) => onError(error instanceof Error ? error.message : String(error)))
-      .finally(() => { this.decoding = false; });
+      .catch((error) =>
+        onError(error instanceof Error ? error.message : String(error)),
+      )
+      .finally(() => {
+        this.decoding = false;
+        const pendingFrame = this.pendingFrame;
+        if (pendingFrame) this.push(pendingFrame, onReady, onError);
+      });
   }
 }
 
@@ -40,7 +56,10 @@ export type RemoteStream = {
   hasFrame: boolean;
 };
 
-export function useRemoteStream(target: RemoteTarget | null, onError: (message: string) => void): RemoteStream {
+export function useRemoteStream(
+  target: RemoteTarget | null,
+  onError: (message: string) => void,
+): RemoteStream {
   const store = useMemo(() => new FrameStore(), [target?.kind, target?.id]);
   const [state, setState] = useState<StreamState>("connecting");
   const [hasFrame, setHasFrame] = useState(false);

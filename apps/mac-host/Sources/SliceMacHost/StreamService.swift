@@ -54,7 +54,7 @@ final class StreamFrameOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unch
             nil
         ) else { return nil }
         let properties = [
-            kCGImageDestinationLossyCompressionQuality: 0.72,
+            kCGImageDestinationLossyCompressionQuality: 0.82,
         ] as CFDictionary
         CGImageDestinationAddImage(destination, image, properties)
         guard CGImageDestinationFinalize(destination) else { return nil }
@@ -83,7 +83,7 @@ enum StreamService {
             value: 1,
             timescale: CMTimeScale(max(1, min(framesPerSecond, 30)))
         )
-        configuration.queueDepth = 3
+        configuration.queueDepth = 2
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
 
         let frameOutput = StreamFrameOutput()
@@ -105,4 +105,3 @@ enum StreamService {
         try await stream.stopCapture()
     }
 }
-

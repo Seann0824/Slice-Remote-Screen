@@ -32,7 +32,10 @@ const credentialStorageKey = "shiwen-remote-host-token-v1";
 
 function defaultSignalUrl() {
   const url = new URL(window.location.href);
-  return url.searchParams.get("server") || "wss://shiwhen.com/api/remote-control/host";
+  return (
+    url.searchParams.get("server") ||
+    "wss://shiwhen.com/api/remote-control/host"
+  );
 }
 
 function initialCredential() {
@@ -54,7 +57,9 @@ export function P2pHostScreen() {
   const pendingCandidates = useRef<RTCIceCandidateInit[]>([]);
   const stopFramesRef = useRef<(() => void) | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
-  const connectRef = useRef<(display: RemoteTarget, credential: string) => void>(() => undefined);
+  const connectRef = useRef<
+    (display: RemoteTarget, credential: string) => void
+  >(() => undefined);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,10 +73,13 @@ export function P2pHostScreen() {
         if (!display) throw new Error("没有找到可共享显示器");
         setTarget(display);
       })
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+      .catch((reason) =>
+        setError(reason instanceof Error ? reason.message : String(reason)),
+      );
     return () => {
       cancelled = true;
-      if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+      if (reconnectTimerRef.current !== null)
+        window.clearTimeout(reconnectTimerRef.current);
       stopFramesRef.current?.();
       socketRef.current?.close(1000, "Host closed");
       peerRef.current?.close();
@@ -85,7 +93,8 @@ export function P2pHostScreen() {
   }
 
   async function control(display: RemoteTarget, message: ControlMessage) {
-    if (message.type === "gesture") await hostApi.gesture(display, message.value);
+    if (message.type === "gesture")
+      await hostApi.gesture(display, message.value);
     if (message.type === "type") await hostApi.type(display, message.text);
     if (message.type === "key") await hostApi.key(display, message.value);
   }
@@ -100,27 +109,40 @@ export function P2pHostScreen() {
     pendingCandidates.current = [];
     const peer = new RTCPeerConnection({ iceServers });
     peerRef.current = peer;
-    const stream = canvas.captureStream(15);
-    for (const track of stream.getTracks()) peer.addTrack(track, stream);
+    const stream = canvas.captureStream(30);
+    const senderUpdates: Promise<void>[] = [];
+    for (const track of stream.getTracks()) {
+      track.contentHint = "detail";
+      const sender = peer.addTrack(track, stream);
+      const parameters = sender.getParameters();
+      if (parameters.encodings.length) {
+        parameters.encodings[0]!.maxBitrate = 12_000_000;
+        parameters.encodings[0]!.maxFramerate = 30;
+        senderUpdates.push(sender.setParameters(parameters));
+      }
+    }
     peer.onicecandidate = (event) => {
       if (event.candidate) {
         sendSignal({ type: "signal.ice", candidate: event.candidate.toJSON() });
       }
     };
     peer.onconnectionstatechange = () => {
-      if (peer.connectionState === "connected") setStatus("手机已建立点对点连接");
+      if (peer.connectionState === "connected")
+        setStatus("手机已建立点对点连接");
       if (peer.connectionState === "failed") setError("点对点连接失败");
     };
     peer.ondatachannel = (event) => {
       event.channel.onmessage = (controlEvent) => {
-        void control(display, JSON.parse(String(controlEvent.data)) as ControlMessage).catch(
-          (reason) => {
-            setError(reason instanceof Error ? reason.message : String(reason));
-          },
-        );
+        void control(
+          display,
+          JSON.parse(String(controlEvent.data)) as ControlMessage,
+        ).catch((reason) => {
+          setError(reason instanceof Error ? reason.message : String(reason));
+        });
       };
     };
     await peer.setRemoteDescription({ type: "offer", sdp: message.sdp });
+    await Promise.all(senderUpdates);
     for (const candidate of pendingCandidates.current.splice(0)) {
       await peer.addIceCandidate(candidate);
     }
@@ -155,20 +177,55 @@ export function P2pHostScreen() {
     if (stopFramesRef.current) return;
     const canvas = canvasRef.current;
     if (!canvas) throw new Error("屏幕画面尚未准备好");
-    canvas.width = Math.max(1, Math.round(display.frame.width));
-    canvas.height = Math.max(1, Math.round(display.frame.height));
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) throw new Error("无法创建画布");
-    stopFramesRef.current = hostApi.stream(display, {
+    const outputCanvas = canvas;
+    const outputContext = context;
+    let stopped = false;
+    let decoding = false;
+    let pendingFrame: Blob | null = null;
+
+    async function drawLatestFrame() {
+      if (decoding || stopped || !pendingFrame) return;
+      const frame = pendingFrame;
+      pendingFrame = null;
+      decoding = true;
+      try {
+        const bitmap = await createImageBitmap(frame);
+        if (stopped) {
+          bitmap.close();
+          return;
+        }
+        if (
+          outputCanvas.width !== bitmap.width ||
+          outputCanvas.height !== bitmap.height
+        ) {
+          outputCanvas.width = bitmap.width;
+          outputCanvas.height = bitmap.height;
+        }
+        outputContext.drawImage(bitmap, 0, 0);
+        bitmap.close();
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      } finally {
+        decoding = false;
+        if (pendingFrame) void drawLatestFrame();
+      }
+    }
+
+    const stopSource = hostApi.stream(display, {
       onState: () => undefined,
       onError: setError,
       onFrame: (blob) => {
-        void createImageBitmap(blob).then((bitmap) => {
-          context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-          bitmap.close();
-        });
+        pendingFrame = blob;
+        void drawLatestFrame();
       },
     });
+    stopFramesRef.current = () => {
+      stopped = true;
+      pendingFrame = null;
+      stopSource();
+    };
   }
 
   function connect(display: RemoteTarget, credential: string) {
@@ -250,7 +307,9 @@ export function P2pHostScreen() {
         <CardHeader>
           <MonitorUp className="mb-2 size-8 text-muted" />
           <CardTitle>连接拾文</CardTitle>
-          <CardDescription>绑定一次后，这台 Mac 每次启动都会自动上线。</CardDescription>
+          <CardDescription>
+            绑定一次后，这台 Mac 每次启动都会自动上线。
+          </CardDescription>
         </CardHeader>
         <div className="flex flex-col gap-3 p-5 pt-0">
           <Input

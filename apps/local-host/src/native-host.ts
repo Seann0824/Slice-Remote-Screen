@@ -52,7 +52,10 @@ export class NativeHost {
 
   async apps(): Promise<Omit<InstalledApp, "hasOpenWindow">[]> {
     const { stdout } = await this.run(["list-apps"]);
-    return installedAppSchema.omit({ hasOpenWindow: true }).array().parse(JSON.parse(stdout));
+    return installedAppSchema
+      .omit({ hasOpenWindow: true })
+      .array()
+      .parse(JSON.parse(stdout));
   }
 
   async launchApp(path: string) {
@@ -87,7 +90,17 @@ export class NativeHost {
     const output = join(directory, "frame.png");
     try {
       await this.run(
-        ["capture", "--kind", kind, "--id", String(id), "--output", output, "--max-width", "1600"],
+        [
+          "capture",
+          "--kind",
+          kind,
+          "--id",
+          String(id),
+          "--output",
+          output,
+          "--max-width",
+          "1600",
+        ],
         20_000,
       );
       return await readFile(output);
@@ -111,31 +124,61 @@ export class NativeHost {
   }
 
   async gesture(kind: TargetKind, id: number, request: PointerGesture) {
+    await this.run(
+      [
+        "gesture",
+        "--kind",
+        kind,
+        "--id",
+        String(id),
+        "--payload",
+        JSON.stringify(request),
+      ],
+      30_000,
+    );
+  }
+
+  async type(kind: TargetKind, id: number, text: string) {
     await this.run([
-      "gesture",
+      "type",
       "--kind",
       kind,
       "--id",
       String(id),
-      "--payload",
-      JSON.stringify(request),
-    ], 30_000);
-  }
-
-  async type(kind: TargetKind, id: number, text: string) {
-    await this.run(["type", "--kind", kind, "--id", String(id), "--text", text]);
+      "--text",
+      text,
+    ]);
   }
 
   async key(kind: TargetKind, id: number, request: KeyRequest) {
-    const args = ["key", "--kind", kind, "--id", String(id), "--key", request.key];
-    if (request.modifiers.length) args.push("--modifiers", request.modifiers.join(","));
+    const args = [
+      "key",
+      "--kind",
+      kind,
+      "--id",
+      String(id),
+      "--key",
+      request.key,
+    ];
+    if (request.modifiers.length)
+      args.push("--modifiers", request.modifiers.join(","));
     await this.run(args);
   }
 
   stream(kind: TargetKind, id: number) {
     const child = spawn(
       this.binaryPath,
-      ["stream", "--kind", kind, "--id", String(id), "--max-width", "1600", "--fps", "15"],
+      [
+        "stream",
+        "--kind",
+        kind,
+        "--id",
+        String(id),
+        "--max-width",
+        "2560",
+        "--fps",
+        "24",
+      ],
       { stdio: ["pipe", "pipe", "pipe"] },
     );
     child.stdin.end();
