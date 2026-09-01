@@ -39,6 +39,7 @@
 
 ```bash
 pnpm install
+pnpm build
 pnpm host:permissions
 pnpm mvp
 ```
@@ -48,7 +49,7 @@ pnpm mvp
 1. 隐私与安全性 → 屏幕与系统音频录制 → Slice Remote Screen Host；
 2. 隐私与安全性 → 辅助功能 → Slice Remote Screen Host。
 
-如果以前只给 Terminal、Codex 或旧裸二进制授权，那份权限不算。必须给新的 `Slice Remote Screen Host.app` 授权。授权后完全退出 Host，再运行 `pnpm mvp`。打开：
+如果以前只给 Terminal、Codex 或旧裸二进制授权，那份权限不算。必须给新的 `Slice Remote Screen Host.app` 授权。授权后完全退出 Host，再运行 `pnpm mvp`。日常启动只需运行 `pnpm mvp`，它不会重复构建或重签 Host；代码更新后才运行 `pnpm mvp:build`。打开：
 
 ```text
 http://127.0.0.1:4173/remote/
