@@ -63,6 +63,47 @@ cp .env.example .env
 
 `.env` 含有访问凭据，不要提交。仓库只提交 `.env.example`。
 
+## 公网 P2P 服务端
+
+公网模式需要一台有公网 IP 的服务器。服务端只负责控制面：管理员鉴权、Mac 设备配对、在线状态和 SDP/ICE 转发。视频和输入走 WebRTC，优先两端直连，直连失败时才走 coturn；服务端不会收到解码后的视频。
+
+当前服务端是单租户 MVP：一个管理员、一个 Mac、一个控制端。它不是多用户 SaaS，别把这个破版本直接拿去给一堆陌生用户共用。
+
+### Docker Compose
+
+服务器上准备 Docker Compose、域名和公网 IP：
+
+```bash
+cp .env.server.example .env.server
+openssl rand -hex 32  # 填入 SIGNALING_ADMIN_TOKEN
+openssl rand -hex 32  # 填入 TURN_SECRET
+docker compose up -d --build
+```
+
+编辑 `.env.server`，至少填写：
+
+- `SIGNALING_ADMIN_TOKEN`：控制端登录 token；
+- `SIGNALING_ALLOWED_ORIGINS`：部署 Web 的 HTTPS Origin；
+- `TURN_SECRET`：必须和 coturn 使用的 secret 一致；
+- `TURN_URLS`：公网可访问的 TURN 地址；
+- `TURN_EXTERNAL_IP`：服务器公网 IP。
+
+用 Nginx/Caddy 把 `https://app.example.com` 反向代理到 `127.0.0.1:8787`，必须保留 WebSocket Upgrade。示例见 [`deploy/nginx.conf.example`](deploy/nginx.conf.example)。生产不要直接暴露明文 8787。
+
+控制端打开：
+
+```text
+https://app.example.com/remote/?mode=controller&token=<SIGNALING_ADMIN_TOKEN>
+```
+
+生成设备密钥后，Mac 本地打开下面的地址，把 `<DEVICE_TOKEN>` 换成刚生成的密钥：
+
+```text
+http://127.0.0.1:4173/remote/?mode=host&server=https://app.example.com&token=<DEVICE_TOKEN>
+```
+
+TURN relay 端口 `49160-49260/udp` 也必须在防火墙和云安全组放行。只开 3478 却不开放 relay 端口，TURN 配了也等于没配。
+
 ## 开发
 
 ```bash

@@ -35,8 +35,8 @@ describe("path configuration", () => {
 });
 
 describe("host content security policy", () => {
-  it("allows the Shiwen WebSocket signaling endpoint", () => {
-    expect(securityHeaders["Content-Security-Policy"]).toContain("wss://shiwhen.com");
+  it("allows self-hosted secure signaling endpoints", () => {
+    expect(securityHeaders["Content-Security-Policy"]).toContain("wss:");
     expect(securityHeaders["Content-Security-Policy"]).toContain("ws://127.0.0.1:8787");
   });
 });

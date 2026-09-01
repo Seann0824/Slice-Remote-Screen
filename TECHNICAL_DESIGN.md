@@ -502,7 +502,7 @@ packages/design-system/
 
 - `.article-body`、BlockNote override、分享卡主题等内容产品专用 CSS；
 - Conversations、Workspace、PageLayout 等 Big Minds 业务组件和信息架构；
-- Big Minds Logo、文案和 `shiwen.theme` 存储键；
+- Big Minds Logo、项目文案和 `slice-remote-screen.theme` 存储键；
 - 旧的 `panel/subtle/subtle-alt` 迁移别名。
 
 Slice Remote Screen 自己只补业务组件：`RemoteCanvas`、`DeviceCard`、`ConnectionStatus`、`ShortcutAppCard`、`SlicePreview`、`RemoteDock`、`ViewSwitcher`、`PairingSheet` 和 `PermissionDialog`。这些组件必须消费上游语义 token 和 primitives，不准写私有颜色、随手造圆角或局部 `dark:` 分支。

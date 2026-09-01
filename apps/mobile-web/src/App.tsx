@@ -153,7 +153,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [savingProfile, setSavingProfile] = useState(false);
   const handleRemoteError = useCallback((message: string) => setError(message), []);
-  const exitToShiwen = useCallback(() => window.location.assign("/"), []);
+  const exitToHome = useCallback(() => window.location.assign("/"), []);
 
   const applicationTargets = useMemo(() => pickApplicationTargets(targets), [targets]);
   const applicationCatalog = useMemo(() => sortApplications(installedApps.map((app) => ({
@@ -353,7 +353,7 @@ export default function App() {
               onSelect={selectApplication}
               onCloseApp={closeApplication}
               onOpenDesktop={() => setViewMode("desktop")}
-              onExit={exitToShiwen}
+              onExit={exitToHome}
               displayAvailable={Boolean(displayTarget)}
               fullScreen
             />
@@ -421,7 +421,7 @@ export default function App() {
           ) : null}
 
           <FullscreenDock>
-            <DockAction label="返回拾文" onClick={exitToShiwen}><ArrowLeft className="size-6" /></DockAction>
+            <DockAction label="返回首页" onClick={exitToHome}><ArrowLeft className="size-6" /></DockAction>
             <DockSeparator />
             <DockAction label="应用画板" onClick={() => setViewMode("apps")}><Grid2X2 className="size-6" /></DockAction>
             <DockSeparator />
@@ -443,7 +443,7 @@ export default function App() {
           <h2 id="app-heading" className="sr-only">{selectedApp.appName || selectedApp.title}</h2>
           <RemoteCanvas target={selectedApp} stream={stream} region={FULL_REGION} onError={handleRemoteError} fillViewport />
           <FullscreenDock>
-            <DockAction label="返回拾文" onClick={exitToShiwen}><ArrowLeft className="size-6" /></DockAction>
+            <DockAction label="返回首页" onClick={exitToHome}><ArrowLeft className="size-6" /></DockAction>
             <DockSeparator />
             <DockAction label="应用画板" onClick={() => setViewMode("apps")}><Grid2X2 className="size-6" /></DockAction>
             <DockSeparator />
@@ -462,7 +462,7 @@ export default function App() {
             <RemoteCanvas target={displayTarget} stream={stream} onError={handleRemoteError} fillViewport />
           ) : <p className="text-body-sm text-muted">没有可用显示器。</p>}
           <FullscreenDock>
-            <DockAction label="返回拾文" onClick={exitToShiwen}><ArrowLeft className="size-6" /></DockAction>
+            <DockAction label="返回首页" onClick={exitToHome}><ArrowLeft className="size-6" /></DockAction>
             <DockSeparator />
             <DockAction label="完整 App" onClick={() => setViewMode("app")}><Scan className="size-6" /></DockAction>
             <DockSeparator />

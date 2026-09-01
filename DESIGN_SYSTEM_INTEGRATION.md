@@ -44,7 +44,7 @@ Big Minds 当前不是一个可安装的设计系统 package。直接从另一�
 - 分享卡静态主题；
 - Conversations、Workspace、Library 等领域组件；
 - Big Minds 的 Logo、导航结构和产品文案；
-- `shiwen.theme` 等品牌化存储键；
+- 旧产品名相关的品牌化存储键；
 - `panel/subtle/subtle-alt` 旧迁移别名。
 
 不做筛选就整包复制，会把无关 CSS、业务耦合和品牌残留全拖进来。这不是复用，是搬垃圾。
@@ -95,7 +95,7 @@ apps/mobile-web
 ## 6. 主题约束
 
 - `html` 使用 `data-theme="light|dark"`；
-- 主题存储键改为 `slice-remote-screen.theme`，不能沿用 `shiwen.theme`；
+- 主题存储键改为 `slice-remote-screen.theme`，不能沿用旧产品名的存储键；
 - 入口脚本在 React mount 前执行主题初始化，避免首屏闪烁；
 - 新组件只用语义 token，不写十六进制颜色、不写 `rgb()`、不随手用 Tailwind 原始色阶；
 - 不为暗色主题在组件内堆 `dark:`，差异统一放在主题 token；

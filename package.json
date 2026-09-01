@@ -8,18 +8,21 @@
     "pnpm": ">=10"
   },
   "scripts": {
-    "build": "pnpm protocol:build && pnpm --filter @slice/mobile-web build && pnpm --filter @slice/local-host build && pnpm host:build",
+    "build": "pnpm protocol:build && pnpm --filter @slice/mobile-web build && pnpm --filter @slice/local-host build && pnpm --filter @slice/signaling-server build && pnpm host:build",
     "build:web": "pnpm protocol:build && pnpm --filter @slice/mobile-web build",
     "check": "pnpm protocol:build && pnpm -r --if-present check && pnpm host:build",
     "dev:api": "pnpm protocol:build && pnpm --filter @slice/local-host dev",
+    "dev:signaling": "pnpm protocol:build && pnpm --filter @slice/signaling-server dev",
     "dev:web": "pnpm protocol:build && pnpm --filter @slice/mobile-web dev",
     "bootstrap": "bash scripts/bootstrap.sh",
+    "build:signaling": "pnpm protocol:build && pnpm --filter @slice/mobile-web build && pnpm --filter @slice/signaling-server build",
     "host:build": "bash scripts/build-mac-host-app.sh",
     "host:permissions": "pnpm host:build && dist/SliceRemoteScreenHost.app/Contents/MacOS/slice-mac-host permissions --request",
     "mvp": "pnpm --filter @slice/local-host start",
     "mvp:build": "pnpm build && pnpm --filter @slice/local-host start",
     "start": "bash scripts/start.sh",
     "start:lan": "bash scripts/start-lan.sh",
+    "start:signaling": "pnpm --filter @slice/signaling-server start",
     "mvp:lan": "pnpm start:lan",
     "protocol:build": "pnpm --filter @slice/protocol build",
     "test": "pnpm protocol:build && pnpm -r --if-present test"

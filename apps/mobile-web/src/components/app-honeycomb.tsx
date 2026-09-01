@@ -652,8 +652,8 @@ export function AppHoneycomb({
                     className="group relative size-12 shrink-0 rounded-[1rem] border border-white/10 bg-white/10 text-white shadow-lg transition-transform hover:-translate-y-1 hover:bg-white/20"
                     size="icon"
                     variant="ghost"
-                    aria-label="返回拾文"
-                    title="返回拾文"
+                    aria-label="返回首页"
+                    title="返回首页"
                     onClick={onExit}
                   >
                     <ArrowLeft className="size-6" />

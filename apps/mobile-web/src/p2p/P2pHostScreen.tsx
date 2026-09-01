@@ -13,6 +13,7 @@ import {
 } from "@slice/design-system";
 import { CircleAlert, MonitorUp, Unplug } from "lucide-react";
 import { hostApi } from "../api";
+import { loadIceServers, signalingWebSocketUrl } from "./signaling";
 
 type SignalMessage =
   | { type: "host.accepted" }
@@ -27,19 +28,16 @@ type ControlMessage =
   | { type: "type"; text: string }
   | { type: "key"; value: KeyRequest };
 
-const iceServers: RTCIceServer[] = [{ urls: "stun:stun.cloudflare.com:3478" }];
-const credentialStorageKey = "shiwen-remote-host-token-v1";
-
-function defaultSignalUrl() {
-  const url = new URL(window.location.href);
-  return (
-    url.searchParams.get("server") ||
-    "wss://shiwhen.com/api/remote-control/host"
-  );
-}
+const credentialStorageKey = "slice-remote-screen.host-device-token-v1";
 
 function initialCredential() {
-  const urlToken = new URL(window.location.href).searchParams.get("token");
+  const url = new URL(window.location.href);
+  const urlToken = url.searchParams.get("token");
+  if (urlToken) {
+    window.localStorage.setItem(credentialStorageKey, urlToken);
+    url.searchParams.delete("token");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }
   return urlToken || window.localStorage.getItem(credentialStorageKey) || "";
 }
 
@@ -47,7 +45,7 @@ export function P2pHostScreen() {
   const [token, setToken] = useState(initialCredential);
   const [savedCredential, setSavedCredential] = useState(initialCredential);
   const [status, setStatus] = useState(
-    token ? "正在自动向拾文报到…" : "粘贴一次 Mac 绑定密钥，之后会自动上线",
+    token ? "正在自动连接信令服务…" : "粘贴一次设备密钥，之后会自动上线",
   );
   const [error, setError] = useState("");
   const [target, setTarget] = useState<RemoteTarget | null>(null);
@@ -107,6 +105,7 @@ export function P2pHostScreen() {
     if (!canvas) throw new Error("屏幕画面尚未准备好");
     peerRef.current?.close();
     pendingCandidates.current = [];
+    const iceServers = await loadIceServers(savedCredential);
     const peer = new RTCPeerConnection({ iceServers });
     peerRef.current = peer;
     const stream = canvas.captureStream(30);
@@ -154,14 +153,14 @@ export function P2pHostScreen() {
 
   async function handleSignal(display: RemoteTarget, message: SignalMessage) {
     if (message.type === "host.accepted") {
-      setStatus("已向拾文报到，等待手机打开控制页");
+      setStatus("已连接信令服务，等待手机打开控制页");
     }
     if (message.type === "peer.ready") setStatus("手机已就绪，正在协商连接");
     if (message.type === "peer.left") {
       peerRef.current?.close();
       peerRef.current = null;
       pendingCandidates.current = [];
-      setStatus("已向拾文报到，等待手机打开控制页");
+      setStatus("已连接信令服务，等待手机打开控制页");
     }
     if (message.type === "signal.offer") await acceptOffer(display, message);
     if (message.type === "signal.ice") {
@@ -234,10 +233,10 @@ export function P2pHostScreen() {
       reconnectTimerRef.current = null;
     }
     setError("");
-    setStatus("正在自动向拾文报到…");
+    setStatus("正在连接信令服务…");
     startFrames(display);
     socketRef.current?.close(1000, "Host reconnecting");
-    const socket = new WebSocket(defaultSignalUrl());
+    const socket = new WebSocket(signalingWebSocketUrl("host"));
     socketRef.current = socket;
     let authenticated = false;
     socket.onopen = () => {
@@ -252,15 +251,15 @@ export function P2pHostScreen() {
       });
     };
     socket.onerror = () => {
-      if (!authenticated) setError("绑定密钥无效或拾文信令服务不可用");
+      if (!authenticated) setError("设备密钥无效或信令服务不可用");
     };
     socket.onclose = (event) => {
       if (socketRef.current !== socket || event.code === 1000) return;
       if (!authenticated) {
-        setStatus("绑定失败，请在拾文重新生成 Mac 绑定密钥");
+        setStatus("绑定失败，请重新生成设备密钥");
         return;
       }
-      setStatus("与拾文断开，正在重连…");
+      setStatus("与信令服务断开，正在重连…");
       reconnectTimerRef.current = window.setTimeout(
         () => connectRef.current(display, credential),
         3000,
@@ -306,7 +305,7 @@ export function P2pHostScreen() {
       <Card variant="outlined">
         <CardHeader>
           <MonitorUp className="mb-2 size-8 text-muted" />
-          <CardTitle>连接拾文</CardTitle>
+          <CardTitle>连接 Slice 服务</CardTitle>
           <CardDescription>
             绑定一次后，这台 Mac 每次启动都会自动上线。
           </CardDescription>

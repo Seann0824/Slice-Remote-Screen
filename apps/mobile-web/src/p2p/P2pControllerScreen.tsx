@@ -26,6 +26,12 @@ import {
   RefreshCw,
   Unplug,
 } from "lucide-react";
+import {
+  loadIceServers,
+  signalingHttpUrl,
+  signalingToken,
+  signalingWebSocketUrl,
+} from "./signaling";
 
 type SignalMessage =
   | { type: "peer.ready" }
@@ -52,8 +58,6 @@ type HostCredential = {
   token_prefix: string;
 };
 
-const iceServers: RTCIceServer[] = [{ urls: "stun:stun.cloudflare.com:3478" }];
-
 async function jsonRequest<T>(
   path: string,
   csrfToken: string,
@@ -62,8 +66,10 @@ async function jsonRequest<T>(
   const headers = new Headers(init.headers);
   if (init.method && init.method !== "GET")
     headers.set("X-CSRF-Token", csrfToken);
+  const token = signalingToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
   if (init.body) headers.set("Content-Type", "application/json");
-  const response = await fetch(path, {
+  const response = await fetch(signalingHttpUrl(path), {
     ...init,
     headers,
     credentials: "same-origin",
@@ -74,11 +80,6 @@ async function jsonRequest<T>(
   if (!response.ok)
     throw new Error(payload.error || `请求失败（${response.status}）`);
   return payload;
-}
-
-function signalUrl() {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/remote-control/controller`;
 }
 
 function normalizedVideoPoint(
@@ -241,7 +242,7 @@ function ControllerViewport({
         onClick={onExit}
       >
         <ArrowLeft />
-        返回拾文
+        返回首页
       </Button>
       <div className="absolute inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] mx-auto flex max-w-xl gap-2 rounded-sheet border border-white/15 bg-black/65 p-2 shadow-overlay backdrop-blur-xl">
         <Input
@@ -299,6 +300,7 @@ export function P2pControllerScreen() {
     closePeer();
     setError("");
     setMessage("Mac 已上线，正在建立点对点连接…");
+    const iceServers = await loadIceServers(signalingToken());
     const peer = new RTCPeerConnection({ iceServers });
     peerRef.current = peer;
     peer.addTransceiver("video", { direction: "recvonly" });
@@ -370,7 +372,7 @@ export function P2pControllerScreen() {
         if (session.user.role !== "admin")
           throw new Error("只有管理员能使用远程控制");
         const nextStatus = await jsonRequest<HostStatus>(
-          "/api/remote-control/device",
+          "/api/device",
           session.csrf_token,
         );
         if (cancelled) return;
@@ -387,8 +389,11 @@ export function P2pControllerScreen() {
           setError(reason instanceof Error ? reason.message : String(reason));
       });
 
-    const socket = new WebSocket(signalUrl());
+    const socket = new WebSocket(signalingWebSocketUrl("controller"));
     socketRef.current = socket;
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ type: "controller.auth", token: signalingToken() }));
+    };
     socket.onmessage = (event) => {
       void handleSignal(JSON.parse(String(event.data)) as SignalMessage).catch(
         (reason) => {
@@ -396,7 +401,7 @@ export function P2pControllerScreen() {
         },
       );
     };
-    socket.onerror = () => setError("无法连接拾文信令服务");
+    socket.onerror = () => setError("无法连接信令服务");
     socket.onclose = (event) => {
       if (!cancelled && event.code !== 1000)
         setError("信令连接已关闭，请刷新重试");
@@ -418,13 +423,13 @@ export function P2pControllerScreen() {
     }
     try {
       const nextCredential = await jsonRequest<HostCredential>(
-        "/api/remote-control/device",
+        "/api/device",
         csrfToken,
         { method: "POST", body: JSON.stringify({ device_name: "我的 Mac" }) },
       );
       setCredential(nextCredential);
       setStatus(
-        await jsonRequest<HostStatus>("/api/remote-control/device", csrfToken),
+        await jsonRequest<HostStatus>("/api/device", csrfToken),
       );
       setMessage("把绑定密钥在 Mac 输入一次，之后它会自动上线。");
       setError("");
@@ -437,7 +442,7 @@ export function P2pControllerScreen() {
     if (!window.confirm("解除后，这台 Mac 将立即离线。确定解除绑定？")) return;
     try {
       await jsonRequest<{ ok: boolean }>(
-        "/api/remote-control/device",
+        "/api/device",
         csrfToken,
         {
           method: "DELETE",
@@ -464,7 +469,7 @@ export function P2pControllerScreen() {
       <ControllerViewport
         stream={stream}
         sendControl={sendControl}
-        onExit={() => window.location.assign("/account")}
+        onExit={() => window.location.assign("/")}
       />
     );
   }
@@ -474,17 +479,17 @@ export function P2pControllerScreen() {
       <Button
         className="self-start"
         variant="ghost"
-        onClick={() => window.location.assign("/account")}
+        onClick={() => window.location.assign("/")}
       >
         <ArrowLeft />
-        返回拾文
+        返回首页
       </Button>
       <Card variant="outlined">
         <CardHeader>
           <MonitorUp className="mb-2 size-8 text-muted" />
           <CardTitle>远程控制 Mac</CardTitle>
           <CardDescription>
-            Slice UI 已由拾文托管；Mac 绑定一次后会自动上线。
+            这是独立部署的 Slice 服务；Mac 绑定一次后会自动上线。
           </CardDescription>
         </CardHeader>
         <div className="flex flex-col gap-4 p-5 pt-0">
