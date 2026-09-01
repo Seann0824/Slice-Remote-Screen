@@ -26,11 +26,14 @@ const nativeHost = new NativeHost(config.nativeBinary);
 const profileStore = new ProfileStore(config.profilePath);
 const appIconCache = new Map<string, Promise<Buffer>>();
 const apiPrefix = "/api";
-const remoteMountPath = "/remote";
+const remoteMountPath = "/slice-remote";
+const remoteMountPaths = ["/remote", remoteMountPath];
 
 function stripRemoteMountPath(pathname: string) {
-  if (pathname === remoteMountPath) return "/";
-  if (pathname.startsWith(`${remoteMountPath}/`)) return pathname.slice(remoteMountPath.length);
+  for (const mountPath of remoteMountPaths) {
+    if (pathname === mountPath) return "/";
+    if (pathname.startsWith(`${mountPath}/`)) return pathname.slice(mountPath.length);
+  }
   return pathname;
 }
 
