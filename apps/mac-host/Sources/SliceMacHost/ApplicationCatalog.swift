@@ -35,7 +35,8 @@ enum ApplicationCatalog {
                     appName: displayName,
                     bundleIdentifier: bundleIdentifier,
                     path: standardizedURL.path,
-                    isRunning: bundleIdentifier.map(runningBundleIdentifiers.contains) ?? runningPaths.contains(standardizedURL.path)
+                    isRunning: bundleIdentifier.map(runningBundleIdentifiers.contains) ?? runningPaths.contains(standardizedURL.path),
+                    hasOpenWindow: false
                 )
             }
         }

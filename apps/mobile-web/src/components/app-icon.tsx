@@ -1,16 +1,37 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@slice/design-system";
-import { hostApi } from "../api";
+import { useRemoteClient } from "../remote-client-context";
 
 const iconCache = new Map<string, Promise<string | null>>();
+const iconQueue: Array<() => void> = [];
+const MAX_CONCURRENT_ICON_REQUESTS = 4;
+let activeIconRequests = 0;
 
-function loadIcon(bundleIdentifier: string) {
-  let icon = iconCache.get(bundleIdentifier);
+function scheduleIconRequest(load: () => Promise<Blob>) {
+  return new Promise<Blob>((resolve, reject) => {
+    const run = () => {
+      activeIconRequests += 1;
+      void load().then(resolve, reject).finally(() => {
+        activeIconRequests -= 1;
+        iconQueue.shift()?.();
+      });
+    };
+    if (activeIconRequests < MAX_CONCURRENT_ICON_REQUESTS) run();
+    else iconQueue.push(run);
+  });
+}
+
+function loadIcon(cacheKey: string, load: () => Promise<Blob>) {
+  let icon = iconCache.get(cacheKey);
   if (!icon) {
-    icon = hostApi.appIcon(bundleIdentifier)
+    icon = scheduleIconRequest(load)
       .then((blob) => URL.createObjectURL(blob))
-      .catch(() => null);
-    iconCache.set(bundleIdentifier, icon);
+      .catch((error) => {
+        // A transient P2P failure must not poison the icon cache forever.
+        iconCache.delete(cacheKey);
+        throw error;
+      });
+    iconCache.set(cacheKey, icon);
   }
   return icon;
 }
@@ -19,13 +40,19 @@ type AppIconTarget = {
   appName?: string | null;
   title?: string;
   bundleIdentifier?: string | null;
+  path?: string | null;
 };
 
 export function AppIcon({ target, className }: { target: AppIconTarget; className?: string }) {
+  const remote = useRemoteClient();
   const [source, setSource] = useState<string | null>(null);
   const [visible, setVisible] = useState(false);
+  const [retry, setRetry] = useState(0);
   const rootRef = useRef<HTMLSpanElement>(null);
   const name = target.appName || target.title || "?";
+  const iconKey = target.bundleIdentifier || target.path || null;
+
+  useEffect(() => { setRetry(0); }, [iconKey]);
 
   useEffect(() => {
     const element = rootRef.current;
@@ -52,12 +79,22 @@ export function AppIcon({ target, className }: { target: AppIconTarget; classNam
 
   useEffect(() => {
     let cancelled = false;
+    let retryTimer: number | null = null;
     setSource(null);
-    if (visible && target.bundleIdentifier) {
-      void loadIcon(target.bundleIdentifier).then((icon) => { if (!cancelled) setSource(icon); });
+    if (visible && iconKey) {
+      void loadIcon(iconKey, () => remote.appIcon(target.bundleIdentifier || "", target.path || undefined))
+        .then((icon) => { if (!cancelled) setSource(icon); })
+        .catch(() => {
+          if (!cancelled && retry === 0) {
+            retryTimer = window.setTimeout(() => setRetry(1), 1_500);
+          }
+        });
     }
-    return () => { cancelled = true; };
-  }, [target.bundleIdentifier, visible]);
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
+  }, [iconKey, remote, retry, target.bundleIdentifier, target.path, visible]);
 
   return (
     <span ref={rootRef} className={cn("grid overflow-hidden rounded-[22%] bg-surface shadow-overlay", className)} aria-hidden="true">

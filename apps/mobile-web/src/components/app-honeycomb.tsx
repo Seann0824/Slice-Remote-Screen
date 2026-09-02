@@ -11,7 +11,7 @@ import {
 import type { InstalledApp } from "@slice/protocol";
 import { Button, cn, Input } from "@slice/design-system";
 import { AppIcon } from "./app-icon";
-import { ArrowLeft, Monitor, Search, Trash2, X } from "lucide-react";
+import { ArrowLeft, Monitor, Search, Settings2, Trash2, X } from "lucide-react";
 
 type Point = { x: number; y: number };
 type CameraBounds = { minX: number; maxX: number; minY: number; maxY: number };
@@ -222,6 +222,8 @@ export function AppHoneycomb({
   apps,
   onSelect,
   onCloseApp,
+  onRemoveShortcut,
+  onConfigureShortcuts,
   onOpenDesktop,
   onExit,
   displayAvailable = false,
@@ -230,6 +232,8 @@ export function AppHoneycomb({
   apps: InstalledApp[];
   onSelect: (app: InstalledApp) => void | Promise<void>;
   onCloseApp: (app: InstalledApp) => void | Promise<void>;
+  onRemoveShortcut?: (app: InstalledApp) => void | Promise<void>;
+  onConfigureShortcuts?: () => void;
   onOpenDesktop?: () => void;
   onExit?: () => void;
   displayAvailable?: boolean;
@@ -409,6 +413,7 @@ export function AppHoneycomb({
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLElement>, source: DragState["source"] = "canvas") => {
     if (event.button !== 0 || dragRef.current) return;
+    event.preventDefault();
     const target = (event.target as HTMLElement).closest<HTMLElement>("[data-app-key]");
     if (source === "dock" && !target?.dataset.appKey) return;
     if (source === "canvas") cancelAnimation();
@@ -445,6 +450,7 @@ export function AppHoneycomb({
   const handlePointerMove = (event: ReactPointerEvent<HTMLElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
     const deltaX = event.clientX - drag.lastX;
     const deltaY = event.clientY - drag.lastY;
     const elapsed = Math.max((event.timeStamp - drag.lastTime) / 1000, 1 / 240);
@@ -475,6 +481,7 @@ export function AppHoneycomb({
   const finishPointer = (event: ReactPointerEvent<HTMLElement>, cancelled = false) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
     if (drag.longPressTimer !== null) window.clearTimeout(drag.longPressTimer);
     dragRef.current = null;
     setDragging(false);
@@ -488,7 +495,9 @@ export function AppHoneycomb({
 
     if (drag.mode === "app") {
       ignorePointerClickUntilRef.current = performance.now() + 500;
-      if (droppedInTrash && draggedApp) void onCloseApp(draggedApp);
+      if (droppedInTrash && draggedApp) {
+        void (onRemoveShortcut ? onRemoveShortcut(draggedApp) : onCloseApp(draggedApp));
+      }
       return;
     }
 
@@ -533,6 +542,7 @@ export function AppHoneycomb({
         onPointerCancel={(event) => finishPointer(event, true)}
         onLostPointerCapture={(event) => finishPointer(event, true)}
         onWheel={handleWheel}
+        onContextMenu={(event) => event.preventDefault()}
       >
         {visibleApps.map((app, index) => {
           const key = keys[index]!;
@@ -684,16 +694,18 @@ export function AppHoneycomb({
                 </Button>
               ))}
               {dockApps.length ? <span className="mx-1 h-10 w-px shrink-0 bg-white/25" aria-hidden="true" /> : null}
-              <Button
-                className="group relative size-12 shrink-0 rounded-[1rem] border border-white/10 bg-white/10 text-white shadow-lg transition-transform hover:-translate-y-1 hover:bg-white/20"
-                size="icon"
-                variant="ghost"
-                aria-label="搜索应用"
-                title="搜索应用"
-                onClick={() => setSearchOpen(true)}
-              >
-                <Search className="size-6" />
-              </Button>
+              {!onConfigureShortcuts ? (
+                <Button
+                  className="group relative size-12 shrink-0 rounded-[1rem] border border-white/10 bg-white/10 text-white shadow-lg transition-transform hover:-translate-y-1 hover:bg-white/20"
+                  size="icon"
+                  variant="ghost"
+                  aria-label="搜索应用"
+                  title="搜索应用"
+                  onClick={() => setSearchOpen(true)}
+                >
+                  <Search className="size-6" />
+                </Button>
+              ) : null}
               <Button
                 className="group relative size-12 shrink-0 rounded-[1rem] border border-white/10 bg-white/10 text-white shadow-lg transition-transform hover:-translate-y-1 hover:bg-white/20"
                 size="icon"
@@ -705,19 +717,35 @@ export function AppHoneycomb({
               >
                 <Monitor className="size-7" />
               </Button>
-              <span className="mx-1 h-10 w-px shrink-0 bg-white/25" aria-hidden="true" />
-              <div
-                ref={trashRef}
-                className={cn(
-                  "pointer-events-none relative flex size-12 shrink-0 cursor-default items-center justify-center rounded-[1rem] border border-white/10 bg-white/10 text-white shadow-lg transition-transform",
-                  trashHighlighted && "-translate-y-2 border-danger bg-danger/35 text-white ring-2 ring-danger/60",
-                )}
-                role="note"
-                aria-label="拖到这里关闭应用"
-                title="拖到这里关闭应用"
-              >
-                <Trash2 className="size-6" />
-              </div>
+              {onConfigureShortcuts ? (
+                <Button
+                  className="group relative size-12 shrink-0 rounded-[1rem] border border-white/10 bg-white/10 text-white shadow-lg transition-transform hover:-translate-y-1 hover:bg-white/20"
+                  size="icon"
+                  variant="ghost"
+                  aria-label="设置首页快捷方式"
+                  title="设置首页快捷方式"
+                  onClick={onConfigureShortcuts}
+                >
+                  <Settings2 className="size-6" />
+                </Button>
+              ) : null}
+              {!onConfigureShortcuts ? (
+                <>
+                  <span className="mx-1 h-10 w-px shrink-0 bg-white/25" aria-hidden="true" />
+                  <div
+                    ref={trashRef}
+                    className={cn(
+                      "pointer-events-none relative flex size-12 shrink-0 cursor-default items-center justify-center rounded-[1rem] border border-white/10 bg-white/10 text-white shadow-lg transition-transform",
+                      trashHighlighted && "-translate-y-2 border-danger bg-danger/35 text-white ring-2 ring-danger/60",
+                    )}
+                    role="note"
+                    aria-label="拖到这里移除快捷方式"
+                    title="拖到这里移除快捷方式"
+                  >
+                    <Trash2 className="size-6" />
+                  </div>
+                </>
+              ) : null}
             </nav>
           </div>
         </>

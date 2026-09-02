@@ -6,7 +6,7 @@
   "scope": "/remote/",
   "display": "fullscreen",
   "display_override": ["fullscreen", "standalone"],
-  "orientation": "any",
+  "orientation": "landscape",
   "background_color": "#f7f7f5",
   "theme_color": "#f7f7f5",
   "icons": [

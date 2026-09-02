@@ -7,6 +7,7 @@ RUN pnpm install --frozen-lockfile
 
 ARG VITE_SIGNALING_SERVER=
 ENV VITE_SIGNALING_SERVER=${VITE_SIGNALING_SERVER}
+ENV VITE_DEFAULT_TRANSPORT=p2p
 RUN pnpm build:signaling
 
 FROM node:22-bookworm-slim

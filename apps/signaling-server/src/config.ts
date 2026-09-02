@@ -19,8 +19,9 @@ function list(value: string | undefined) {
 export type SignalingConfig = {
   bindHost: string;
   port: number;
-  adminToken: string;
+  accountsFile: string;
   dataFile: string;
+  sessionsFile: string;
   allowedOrigins: string[];
   webRoot: string;
   turnUrls: string[];
@@ -48,8 +49,9 @@ export function loadSignalingConfig(environment: NodeJS.ProcessEnv = process.env
   return {
     bindHost: environment.SIGNALING_HOST?.trim() || "0.0.0.0",
     port,
-    adminToken: required(environment, "SIGNALING_ADMIN_TOKEN", 32),
     dataFile: resolve(repositoryRoot, environment.SIGNALING_DATA_FILE || "data/device.json"),
+    accountsFile: resolve(repositoryRoot, environment.SIGNALING_ACCOUNTS_FILE || "data/accounts.json"),
+    sessionsFile: resolve(repositoryRoot, environment.SIGNALING_SESSIONS_FILE || "data/sessions.json"),
     allowedOrigins: list(environment.SIGNALING_ALLOWED_ORIGINS),
     webRoot: resolve(currentDirectory, environment.SIGNALING_WEB_ROOT || "../../mobile-web/dist"),
     turnUrls,

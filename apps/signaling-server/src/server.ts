@@ -1,25 +1,29 @@
 import { access, readFile } from "node:fs/promises";
-import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, normalize, resolve, sep } from "node:path";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { z, ZodError } from "zod";
+import { sessionCookie, SessionStore, setSessionCookie, clearSessionCookie } from "./auth.js";
+import { AccountStore } from "./account-store.js";
 import { loadSignalingConfig } from "./config.js";
 import { DeviceStore } from "./device-store.js";
 import { issueIceServers } from "./turn.js";
 
 const config = loadSignalingConfig();
+const accountStore = new AccountStore(config.accountsFile);
 const deviceStore = new DeviceStore(config.dataFile);
+const sessions = new SessionStore(config.sessionsFile);
+await sessions.load();
 const connections = new Set<WebSocket>();
 const roles = new Map<WebSocket, "host" | "controller">();
+const connectionAccounts = new Map<WebSocket, string>();
 const peers = new Map<WebSocket, WebSocket>();
 const apiPrefix = "/api";
 const mountPaths = ["/remote", "/slice-remote"];
 const maxMessageBytes = 256 * 1024;
-const deviceNameSchema = z.object({ device_name: z.string().trim().min(1).max(80) });
+const loginSchema = z.object({ email: z.string().trim().email().max(254), password: z.string().min(1).max(256) });
+const registerSchema = z.object({ email: z.string().trim().email().max(254), password: z.string().min(12).max(256) });
 const signalMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("host.auth"), token: z.string().min(16).max(256) }),
-  z.object({ type: z.literal("controller.auth"), token: z.string().min(16).max(256) }),
   z.object({ type: z.literal("signal.offer"), sdp: z.string().min(1).max(128_000) }),
   z.object({ type: z.literal("signal.answer"), sdp: z.string().min(1).max(128_000) }),
   z.object({ type: z.literal("signal.ice"), candidate: z.record(z.string(), z.unknown()) }),
@@ -55,7 +59,7 @@ function originAllowed(request: IncomingMessage) {
 function corsHeaders(request: IncomingMessage) {
   const origin = request.headers.origin;
   return origin && config.allowedOrigins.includes(origin)
-    ? { "Access-Control-Allow-Origin": origin, Vary: "Origin" }
+    ? { "Access-Control-Allow-Origin": origin, "Access-Control-Allow-Credentials": "true", Vary: "Origin" }
     : {};
 }
 
@@ -69,22 +73,8 @@ function sendJson(request: IncomingMessage, response: ServerResponse, status: nu
   response.end(JSON.stringify(value));
 }
 
-function bearerToken(request: IncomingMessage) {
-  const value = request.headers.authorization;
-  return value?.startsWith("Bearer ") ? value.slice("Bearer ".length) : null;
-}
-
-function isAdmin(request: IncomingMessage) {
-  const provided = bearerToken(request);
-  if (!provided) return false;
-  const left = Buffer.from(provided);
-  const right = Buffer.from(config.adminToken);
-  return left.length === right.length && timingSafeEqual(left, right);
-}
-
-async function isDevice(request: IncomingMessage) {
-  const token = bearerToken(request);
-  return Boolean(token && await deviceStore.matches(token));
+function sessionAccount(request: IncomingMessage) {
+  return sessions.account(sessionCookie(request));
 }
 
 async function readJson(request: IncomingMessage) {
@@ -117,34 +107,56 @@ async function handleApi(request: IncomingMessage, response: ServerResponse, url
     response.end();
     return;
   }
-  const admin = isAdmin(request);
-  const device = url.pathname === `${apiPrefix}/ice-servers` && await isDevice(request);
-  if (!admin && !device) {
+
+  if (url.pathname === `${apiPrefix}/auth/login` && request.method === "POST") {
+    const body = loginSchema.parse(await readJson(request));
+    const accountId = await accountStore.verify(body.email, body.password);
+    if (!accountId) {
+      sendJson(request, response, 401, { error: "账号或密码错误" });
+      return;
+    }
+    setSessionCookie(request, response, await sessions.create(accountId));
+    sendJson(request, response, 200, { user: { email: accountId } });
+    return;
+  }
+  if (url.pathname === `${apiPrefix}/auth/register` && request.method === "POST") {
+    const body = registerSchema.parse(await readJson(request));
+    try {
+      const accountId = await accountStore.register(body.email, body.password);
+      setSessionCookie(request, response, await sessions.create(accountId));
+      sendJson(request, response, 201, { user: { email: accountId } });
+    } catch (error) {
+      if (error instanceof Error && error.message === "Account already exists") {
+        sendJson(request, response, 409, { error: "账号已存在" });
+        return;
+      }
+      throw error;
+    }
+    return;
+  }
+  if (url.pathname === `${apiPrefix}/auth/logout` && request.method === "POST") {
+    await sessions.remove(sessionCookie(request));
+    clearSessionCookie(response);
+    sendJson(request, response, 200, { ok: true });
+    return;
+  }
+
+  const accountId = sessionAccount(request);
+  if (!accountId) {
     sendJson(request, response, 401, { error: "Unauthorized" });
     return;
   }
   if (url.pathname === `${apiPrefix}/auth/me` && request.method === "GET") {
-    sendJson(request, response, 200, { csrf_token: "bearer-authenticated", user: { role: "admin" } });
+    sendJson(request, response, 200, { user: { email: accountId } });
     return;
   }
   if (url.pathname === `${apiPrefix}/device` && request.method === "GET") {
     sendJson(request, response, 200, {
-      device: await deviceStore.info(),
-      online: [...roles].some(([socket, role]) => role === "host" && socket.readyState === WebSocket.OPEN),
+      device: await deviceStore.info(accountId),
+      online: [...roles].some(([socket, role]) =>
+        role === "host" && connectionAccounts.get(socket) === accountId && socket.readyState === WebSocket.OPEN,
+      ),
     });
-    return;
-  }
-  if (url.pathname === `${apiPrefix}/device` && request.method === "POST") {
-    const body = deviceNameSchema.parse(await readJson(request));
-    const credential = await deviceStore.create(body.device_name);
-    disconnectRole("host", 4001, "Device replaced");
-    sendJson(request, response, 200, credential);
-    return;
-  }
-  if (url.pathname === `${apiPrefix}/device` && request.method === "DELETE") {
-    await deviceStore.remove();
-    disconnectRole("host", 4001, "Device revoked");
-    sendJson(request, response, 200, { ok: true });
     return;
   }
   if (url.pathname === `${apiPrefix}/ice-servers` && request.method === "GET") {
@@ -187,18 +199,35 @@ function sendPeer(socket: WebSocket, value: unknown) {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value));
 }
 
-function disconnectRole(role: "host" | "controller", code: number, reason: string) {
-  for (const [socket, socketRole] of roles) {
-    if (socketRole === role) socket.close(code, reason);
+function summarizeSdp(sdp: string) {
+  const counts = { host: 0, srflx: 0, relay: 0, other: 0 };
+  for (const line of sdp.split(/\r?\n/)) {
+    if (!line.startsWith("a=candidate:")) continue;
+    const type = line.match(/ typ ([a-z]+)/)?.[1];
+    if (type === "host" || type === "srflx" || type === "relay") counts[type] += 1;
+    else counts.other += 1;
   }
+  return `sdpCandidates(host=${counts.host},srflx=${counts.srflx},relay=${counts.relay},other=${counts.other})`;
 }
 
-function attachPeer(socket: WebSocket, role: "host" | "controller") {
+function summarizeCandidate(candidate: Record<string, unknown>) {
+  const value = typeof candidate.candidate === "string" ? candidate.candidate : "";
+  const type = value.match(/ typ ([a-z]+)/)?.[1] || "unknown";
+  const protocol = value.match(/^candidate:\S+ \d+ ([a-z]+) /)?.[1] || "?";
+  return `candidate(type=${type},protocol=${protocol})`;
+}
+
+function attachPeer(socket: WebSocket, role: "host" | "controller", accountId: string) {
   const oppositeRole = role === "host" ? "controller" : "host";
   for (const [other, otherRole] of roles) {
-    if (otherRole === oppositeRole && other.readyState === WebSocket.OPEN) {
+    if (
+      otherRole === oppositeRole &&
+      connectionAccounts.get(other) === accountId &&
+      other.readyState === WebSocket.OPEN
+    ) {
       peers.set(socket, other);
       peers.set(other, socket);
+      console.info(`[signal] peer paired (${role} + ${oppositeRole})`);
       sendPeer(socket, { type: "peer.ready" });
       sendPeer(other, { type: "peer.ready" });
       return;
@@ -209,31 +238,38 @@ function attachPeer(socket: WebSocket, role: "host" | "controller") {
 function handleSocketMessage(socket: WebSocket, raw: RawData) {
   const message = signalMessageSchema.parse(JSON.parse(raw.toString()));
   const role = roles.get(socket);
-  if (!role) {
-    if (message.type === "host.auth") {
-      void deviceStore.matches(message.token).then((valid) => {
-        if (!valid) return socket.close(4401, "Invalid device token");
-        disconnectRole("host", 4001, "Host reconnected");
-        roles.set(socket, "host");
-        sendPeer(socket, { type: "host.accepted" });
-        attachPeer(socket, "host");
-      });
-      return;
-    }
-    if (message.type === "controller.auth" && message.token === config.adminToken) {
-      disconnectRole("controller", 4001, "Controller reconnected");
-      roles.set(socket, "controller");
-      attachPeer(socket, "controller");
-      return;
-    }
-    throw new Error("Authentication required");
-  }
-  if (message.type === "host.auth" || message.type === "controller.auth") {
-    throw new Error("Already authenticated");
-  }
+  if (!role) throw new Error("Authentication required");
   const peer = peers.get(socket);
+  const detail = "sdp" in message
+    ? ` ${summarizeSdp(message.sdp)}`
+    : message.type === "signal.ice"
+      ? ` ${summarizeCandidate(message.candidate)}`
+      : "";
+  console.info(`[signal] ${role} -> ${message.type} (paired=${Boolean(peer)})${detail}`);
   if (!peer) return;
   sendPeer(peer, message);
+}
+
+function detachPeer(socket: WebSocket, notifyPeer = true) {
+  const peer = peers.get(socket);
+  peers.delete(socket);
+  if (!peer || peers.get(peer) !== socket) return;
+
+  // Only remove the reverse edge when it still points to this socket. An old
+  // controller may finish closing after its replacement has already paired;
+  // deleting the replacement edge here would silently drop every answer and
+  // ICE candidate sent by the host.
+  peers.delete(peer);
+  if (notifyPeer) sendPeer(peer, { type: "peer.left" });
+}
+
+function disconnectAccountRole(accountId: string, role: "host" | "controller") {
+  for (const [socket, socketRole] of roles) {
+    if (socketRole === role && connectionAccounts.get(socket) === accountId) {
+      detachPeer(socket);
+      socket.close(4001, "Reconnected");
+    }
+  }
 }
 
 const server = createServer(async (request, response) => {
@@ -253,45 +289,46 @@ server.on("upgrade", (request, socket, head) => {
   try {
     const url = requestUrl(request);
     url.pathname = stripMountPath(url.pathname);
-    if (!originAllowed(request) || !["/ws/host", "/ws/controller"].includes(url.pathname)) {
+    const accountId = sessionAccount(request);
+    if (!originAllowed(request) || !accountId || !["/ws/host", "/ws/controller"].includes(url.pathname)) {
       socket.destroy();
       return;
     }
-    webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
-      webSocketServer.emit("connection", webSocket);
+    const role = url.pathname === "/ws/host" ? "host" : "controller";
+  webSocketServer.handleUpgrade(request, socket, head, (webSocket) => {
+      webSocketServer.emit("connection", webSocket, request, role, accountId);
     });
   } catch {
     socket.destroy();
   }
 });
 
-webSocketServer.on("connection", (socket: WebSocket) => {
+webSocketServer.on("connection", (
+  socket: WebSocket,
+  _request: IncomingMessage,
+  role: "host" | "controller",
+  accountId: string,
+) => {
   connections.add(socket);
-  const authTimeout = setTimeout(() => socket.close(4401, "Authentication timeout"), 5_000);
-  socket.once("message", (raw) => {
+  disconnectAccountRole(accountId, role);
+  roles.set(socket, role);
+  connectionAccounts.set(socket, accountId);
+  console.info(`[signal] ${role} connected`);
+  if (role === "host") void deviceStore.register(accountId, "Mac");
+  if (role === "host") sendPeer(socket, { type: "host.accepted" });
+  attachPeer(socket, role, accountId);
+  socket.on("message", (message) => {
     try {
-      clearTimeout(authTimeout);
-      handleSocketMessage(socket, raw);
-      socket.on("message", (message) => {
-        try {
-          handleSocketMessage(socket, message);
-        } catch {
-          socket.close(4400, "Invalid signaling message");
-        }
-      });
+      handleSocketMessage(socket, message);
     } catch {
-      socket.close(4400, "Invalid authentication message");
+      socket.close(4400, "Invalid signaling message");
     }
   });
   socket.on("close", () => {
-    clearTimeout(authTimeout);
-    const peer = peers.get(socket);
-    if (peer) {
-      peers.delete(peer);
-      sendPeer(peer, { type: "peer.left" });
-    }
-    peers.delete(socket);
+    console.info(`[signal] ${roles.get(socket) || role} disconnected`);
+    detachPeer(socket);
     roles.delete(socket);
+    connectionAccounts.delete(socket);
     connections.delete(socket);
   });
 });

@@ -20,8 +20,11 @@ export function isAuthorized(request: IncomingMessage, expectedToken: string | n
 }
 
 export const securityHeaders = {
+  // The host can connect to a self-hosted signaling origin supplied at runtime.
+  // Production deployments should use HTTPS/WSS; HTTP/WS remains available for
+  // localhost and temporary IP-based installations.
   "Content-Security-Policy":
-    "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:8787 ws://127.0.0.1:8787; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http: https: ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",

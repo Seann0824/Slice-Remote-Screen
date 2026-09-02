@@ -14,18 +14,6 @@ function signalingOrigin() {
   return url.origin;
 }
 
-export function signalingToken() {
-  const url = new URL(window.location.href);
-  const token = url.searchParams.get("token");
-  if (token) {
-    window.sessionStorage.setItem("slice-remote-screen.signaling-token", token);
-    url.searchParams.delete("token");
-    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-    return token;
-  }
-  return window.sessionStorage.getItem("slice-remote-screen.signaling-token") || "";
-}
-
 export function signalingHttpUrl(path: string) {
   return new URL(path, signalingOrigin()).toString();
 }
@@ -36,11 +24,45 @@ export function signalingWebSocketUrl(role: "host" | "controller") {
   return url.toString();
 }
 
-export async function loadIceServers(token: string) {
+export async function signalingLogin(email: string, password: string) {
+  const response = await fetch(signalingHttpUrl("/api/auth/login"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ email, password }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as { error?: string };
+  if (!response.ok) throw new Error(payload.error || `登录失败（${response.status}）`);
+}
+
+export async function signalingRegister(email: string, password: string) {
+  const response = await fetch(signalingHttpUrl("/api/auth/register"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ email, password }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as { error?: string };
+  if (!response.ok) throw new Error(payload.error || `注册失败（${response.status}）`);
+}
+
+export async function signalingSession() {
+  const response = await fetch(signalingHttpUrl("/api/auth/me"), {
+    credentials: "include",
+    cache: "no-store",
+  });
+  if (!response.ok) return null;
+  return (await response.json()) as { user: { email: string; role: string } };
+}
+
+export async function loadIceServers() {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 5_000);
   try {
     const response = await fetch(signalingHttpUrl("/api/ice-servers"), {
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      credentials: "include",
       cache: "no-store",
+      signal: controller.signal,
     });
     if (!response.ok) throw new Error(`ICE 配置请求失败（${response.status}）`);
     const payload = (await response.json()) as { ice_servers?: RTCIceServer[] };
@@ -49,5 +71,7 @@ export async function loadIceServers(token: string) {
     // STUN is still useful when TURN is unavailable; the peer will report a
     // connection failure instead of making the controller page unusable.
     return defaultIceServers;
+  } finally {
+    window.clearTimeout(timeout);
   }
 }

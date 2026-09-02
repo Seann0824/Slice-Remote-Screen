@@ -8,6 +8,17 @@ import UniformTypeIdentifiers
 final class StreamFrameOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private let context = CIContext(options: [.cacheIntermediates: false])
     private let output = FileHandle.standardOutput
+    private let onPixelBuffer: ((CVPixelBuffer, CMTime) -> Void)?
+    private let onStopped: ((Error) -> Void)?
+
+    init(
+        onPixelBuffer: ((CVPixelBuffer, CMTime) -> Void)? = nil,
+        onStopped: ((Error) -> Void)? = nil
+    ) {
+        self.onPixelBuffer = onPixelBuffer
+        self.onStopped = onStopped
+        super.init()
+    }
 
     func stream(
         _ stream: SCStream,
@@ -19,6 +30,11 @@ final class StreamFrameOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unch
               frameIsComplete(sampleBuffer),
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
+        if let onPixelBuffer {
+            onPixelBuffer(pixelBuffer, CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            return
+        }
+
         autoreleasepool {
             let image = CIImage(cvPixelBuffer: pixelBuffer)
             guard let cgImage = context.createCGImage(image, from: image.extent),
@@ -28,6 +44,10 @@ final class StreamFrameOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unch
     }
 
     func stream(_ stream: SCStream, didStopWithError error: any Error) {
+        if let onStopped {
+            onStopped(error)
+            return
+        }
         let message = "ScreenCaptureKit stream stopped: \(error.localizedDescription)\n"
         FileHandle.standardError.write(Data(message.utf8))
         exit(1)
@@ -38,10 +58,11 @@ final class StreamFrameOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unch
             sampleBuffer,
             createIfNecessary: false
         ) as? [[SCStreamFrameInfo: Any]],
-        let statusValue = attachments.first?[.status] as? Int,
-        let status = SCFrameStatus(rawValue: statusValue) else {
-            return false
+        let rawStatus = attachments.first?[.status] else {
+            return true
         }
+        let statusValue = (rawStatus as? NSNumber)?.intValue ?? (rawStatus as? Int)
+        guard let statusValue, let status = SCFrameStatus(rawValue: statusValue) else { return true }
         return status == .complete
     }
 

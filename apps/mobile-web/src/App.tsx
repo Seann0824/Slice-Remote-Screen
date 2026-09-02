@@ -18,20 +18,38 @@ import {
   CircleAlert,
   Grid2X2,
   Monitor,
+  MoreHorizontal,
   PanelsTopLeft,
   Plus,
+  RotateCw,
   Scan,
   X,
 } from "lucide-react";
-import { hostApi } from "./api";
+import { useRemoteClient } from "./remote-client-context";
 import { AppHoneycomb } from "./components/app-honeycomb";
 import { AppIcon } from "./components/app-icon";
 import { RegionLayoutCanvas } from "./components/region-layout-canvas";
+import { CodexMobileView } from "./components/codex-mobile-view";
 import { FULL_REGION, RemoteCanvas } from "./components/remote-canvas";
 import { useRemoteStream } from "./components/use-remote-stream";
 import { loadProfile, saveRegions } from "./profiles";
+import { isCodexTarget } from "./adapters/codex";
 
-type ViewMode = "apps" | "regions" | "app" | "desktop";
+type ViewMode = "apps" | "regions" | "codex" | "app" | "desktop";
+const SHORTCUTS_STORAGE_KEY = "slice-remote-screen.home-shortcuts-v1";
+type LockableScreenOrientation = ScreenOrientation & {
+  lock?: (orientation: "landscape" | "portrait" | "any") => Promise<void>;
+};
+
+function readShortcutKeys() {
+  try {
+    const value = window.localStorage.getItem(SHORTCUTS_STORAGE_KEY);
+    const parsed = value ? JSON.parse(value) : null;
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed as string[] : null;
+  } catch {
+    return null;
+  }
+}
 
 function pickApplicationTargets(targets: RemoteTarget[]) {
   const apps = new Map<string, RemoteTarget>();
@@ -108,15 +126,29 @@ function DockSeparator() {
   return <span className="mx-1 h-9 w-px shrink-0 bg-white/20" aria-hidden="true" />;
 }
 
-function FullscreenDock({ children }: { children: ReactNode }) {
+function FullscreenDock({ children, defaultVisible = false }: { children: ReactNode; defaultVisible?: boolean }) {
+  const [visible, setVisible] = useState(defaultVisible);
   return (
-    <div className="pointer-events-none absolute inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[9999] flex flex-col items-center">
-      <nav
-        className="pointer-events-auto flex max-w-full items-end gap-1 overflow-visible rounded-[1.75rem] border border-white/15 bg-black/65 px-2.5 py-2.5 shadow-[0_16px_50px_rgb(0_0_0/35%)] backdrop-blur-2xl"
-        aria-label="全屏控制"
-      >
-        {children}
-      </nav>
+    <div className="pointer-events-none absolute inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[9999] flex justify-end">
+      {visible ? (
+        <nav
+          className="pointer-events-auto flex max-w-full items-end gap-1 overflow-visible rounded-[1.75rem] border border-white/15 bg-black/65 px-2.5 py-2.5 shadow-[0_16px_50px_rgb(0_0_0/35%)] backdrop-blur-2xl"
+          aria-label="全屏控制"
+        >
+          {children}
+          <DockAction label="隐藏控制栏" onClick={() => setVisible(false)}><MoreHorizontal className="size-6" /></DockAction>
+        </nav>
+      ) : (
+        <button
+          type="button"
+          className="pointer-events-auto flex size-10 items-center justify-center rounded-full border border-white/20 bg-black/60 text-white shadow-overlay backdrop-blur-xl"
+          aria-label="显示控制栏"
+          title="显示控制栏"
+          onClick={() => setVisible(true)}
+        >
+          <MoreHorizontal className="size-5" />
+        </button>
+      )}
     </div>
   );
 }
@@ -138,10 +170,13 @@ function ErrorNotice({ message, onDismiss, floating = false }: { message: string
 }
 
 export default function App() {
+  const remote = useRemoteClient();
   const [permissions, setPermissions] = useState<HostPermissions | null>(null);
   const [targets, setTargets] = useState<RemoteTarget[]>([]);
   const [installedApps, setInstalledApps] = useState<InstalledApp[]>([]);
   const [selectedAppId, setSelectedAppId] = useState<number | null>(null);
+  const [shortcutKeys, setShortcutKeys] = useState<string[] | null>(() => readShortcutKeys());
+  const [shortcutEditorOpen, setShortcutEditorOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("apps");
   const [profile, setProfile] = useState<AppProfile | null>(null);
   const [editing, setEditing] = useState(false);
@@ -153,27 +188,50 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [savingProfile, setSavingProfile] = useState(false);
   const handleRemoteError = useCallback((message: string) => setError(message), []);
-  const exitToHome = useCallback(() => window.location.assign("/"), []);
+  const exitToHome = useCallback(() => {
+    setViewMode("apps");
+    setEditing(false);
+    setEditingRegionId(null);
+    setLayoutEditing(false);
+    setDraftRegion(null);
+  }, []);
 
   const applicationTargets = useMemo(() => pickApplicationTargets(targets), [targets]);
   const applicationCatalog = useMemo(() => sortApplications(installedApps.map((app) => ({
     ...app,
     hasOpenWindow: Boolean(findTargetForApp(app, targets)),
   }))), [installedApps, targets]);
+  const shortcutApps = useMemo(() => {
+    const catalog = new Map(applicationCatalog.map((app) => [app.appKey, app]));
+    if (shortcutKeys) return shortcutKeys.map((key) => catalog.get(key)).filter((app): app is InstalledApp => Boolean(app));
+    return applicationCatalog.filter((app) => app.hasOpenWindow || /codex/i.test(`${app.appName} ${app.bundleIdentifier ?? ""}`)).slice(0, 6);
+  }, [applicationCatalog, shortcutKeys]);
   const displayTarget = useMemo(() => targets.find((target) => target.kind === "display") ?? null, [targets]);
   const selectedApp = useMemo(() => (
     applicationTargets.find((target) => target.id === selectedAppId) ?? applicationTargets[0] ?? null
   ), [applicationTargets, selectedAppId]);
   const activeTarget = viewMode === "desktop" ? displayTarget : viewMode === "apps" ? null : selectedApp;
-  const immersive = viewMode === "app" || viewMode === "desktop";
+  const immersive = viewMode === "codex" || viewMode === "app" || viewMode === "desktop";
   const appCanvas = viewMode === "apps";
   const canvasView = appCanvas || viewMode === "regions" || immersive;
   const stream = useRemoteStream(activeTarget, handleRemoteError);
 
+  useEffect(() => {
+    if (!immersive) return;
+    const orientation = window.screen.orientation as LockableScreenOrientation;
+    if (orientation?.lock) void orientation.lock("landscape").catch(() => undefined);
+    return () => { orientation?.unlock?.(); };
+  }, [immersive]);
+
+  const requestLandscape = () => {
+    const orientation = window.screen.orientation as LockableScreenOrientation;
+    if (orientation?.lock) void orientation.lock("landscape").catch(() => undefined);
+  };
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [nextPermissions, nextApplications] = await Promise.all([hostApi.permissions(), hostApi.apps()]);
+      const [nextPermissions, nextApplications] = await Promise.all([remote.permissions(), remote.apps()]);
       setPermissions(nextPermissions);
       setInstalledApps(nextApplications);
       if (!nextPermissions.screenRecording) {
@@ -182,7 +240,7 @@ export default function App() {
         setError(null);
         return;
       }
-      const nextTargets = await hostApi.targets();
+      const nextTargets = await remote.targets();
       const nextApps = pickApplicationTargets(nextTargets);
       setTargets(nextTargets);
       setSelectedAppId((current) => {
@@ -195,7 +253,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [remote]);
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -206,18 +264,18 @@ export default function App() {
     setLayoutEditing(false);
     setDraftRegion(null);
     if (selectedApp) {
-      void loadProfile(selectedApp)
+      void loadProfile(selectedApp, remote)
         .then((nextProfile) => { if (!cancelled) setProfile(nextProfile); })
         .catch((profileError) => {
           if (!cancelled) handleRemoteError(profileError instanceof Error ? profileError.message : String(profileError));
         });
     }
     return () => { cancelled = true; };
-  }, [handleRemoteError, selectedApp]);
+  }, [handleRemoteError, remote, selectedApp]);
 
   const requestPermissions = async () => {
     try {
-      await hostApi.requestPermissions();
+      await remote.requestPermissions();
       await load();
     } catch (permissionError) {
       setError(permissionError instanceof Error ? permissionError.message : String(permissionError));
@@ -230,18 +288,18 @@ export default function App() {
       let target = findTargetForApp(app, nextTargets);
       if (!target) {
         if (!permissions?.screenRecording) throw new Error("先授权屏幕录制，否则打开了 App 也看不到画面。");
-        await hostApi.launchApp(app.path);
+        await remote.launchApp(app.path);
         for (let attempt = 0; attempt < 12 && !target; attempt += 1) {
           await new Promise((resolve) => window.setTimeout(resolve, 400));
-          nextTargets = await hostApi.targets();
+          nextTargets = await remote.targets();
           target = findTargetForApp(app, nextTargets);
         }
         setTargets(nextTargets);
-        setInstalledApps(await hostApi.apps());
+        setInstalledApps(await remote.apps());
       }
       if (!target) throw new Error(`${app.appName} 已启动，但没有可共享窗口。它可能是菜单栏或后台应用。`);
       setSelectedAppId(target.id);
-      setViewMode("app");
+      setViewMode(isCodexTarget(target) ? "codex" : "app");
       setError(null);
     } catch (selectionError) {
       setError(selectionError instanceof Error ? selectionError.message : String(selectionError));
@@ -250,13 +308,24 @@ export default function App() {
 
   const closeApplication = async (app: InstalledApp) => {
     try {
-      await hostApi.closeApp(app.path);
+      await remote.closeApp(app.path);
       await new Promise((resolve) => window.setTimeout(resolve, 300));
       await load();
       setError(null);
     } catch (closeError) {
       setError(closeError instanceof Error ? closeError.message : String(closeError));
     }
+  };
+
+  const updateShortcuts = (nextKeys: string[]) => {
+    const unique = [...new Set(nextKeys)].slice(0, 12);
+    setShortcutKeys(unique);
+    window.localStorage.setItem(SHORTCUTS_STORAGE_KEY, JSON.stringify(unique));
+  };
+
+  const toggleShortcut = (key: string) => {
+    const current = shortcutKeys ?? shortcutApps.map((app) => app.appKey);
+    updateShortcuts(current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
   };
 
   const beginRegion = () => {
@@ -279,7 +348,7 @@ export default function App() {
     if (!selectedApp || savingProfile) return;
     setSavingProfile(true);
     try {
-      setProfile(await saveRegions(selectedApp, regions));
+      setProfile(await saveRegions(selectedApp, regions, remote));
     } catch (profileError) {
       handleRemoteError(profileError instanceof Error ? profileError.message : String(profileError));
     } finally {
@@ -307,6 +376,8 @@ export default function App() {
     if (!selectedApp || !profile || savingProfile) return;
     await persistRegions(profile.regions.filter((region) => region.id !== regionId));
   };
+
+  const openSelectedApp = () => setViewMode(selectedApp && isCodexTarget(selectedApp) ? "codex" : "app");
 
   return (
     <main className={cn(
@@ -340,6 +411,17 @@ export default function App() {
         <ErrorNotice message={error} floating onDismiss={() => setError(null)} />
       ) : null}
 
+      {immersive ? (
+        <div className="fixed inset-0 z-[20000] hidden items-center justify-center bg-[#101010] p-8 text-center text-white [@media(orientation:portrait)]:flex">
+          <div className="max-w-xs">
+            <RotateCw className="mx-auto mb-5 size-12 text-white/80" aria-hidden="true" />
+            <p className="text-base font-semibold">请横屏使用远程画面</p>
+            <p className="mt-2 text-sm leading-6 text-white/55">桌面应用是横向布局，竖屏会把文字压成一条，继续操作只是在折磨自己。</p>
+            <Button className="mt-5 bg-white text-black hover:bg-white/85" onClick={requestLandscape}>尝试切换横屏</Button>
+          </div>
+        </div>
+      ) : null}
+
       {!canvasView && error ? (
         <ErrorNotice message={error} onDismiss={() => setError(null)} />
       ) : null}
@@ -349,11 +431,12 @@ export default function App() {
           <h1 id="apps-heading" className="sr-only">选择应用</h1>
           {applicationCatalog.length ? (
             <AppHoneycomb
-              apps={applicationCatalog}
+              apps={shortcutApps}
               onSelect={selectApplication}
               onCloseApp={closeApplication}
+              onRemoveShortcut={(app) => updateShortcuts((shortcutKeys ?? shortcutApps.map((item) => item.appKey)).filter((key) => key !== app.appKey))}
+              onConfigureShortcuts={() => setShortcutEditorOpen(true)}
               onOpenDesktop={() => setViewMode("desktop")}
-              onExit={exitToHome}
               displayAvailable={Boolean(displayTarget)}
               fullScreen
             />
@@ -365,6 +448,42 @@ export default function App() {
               </CardHeader>
             </Card>
           )}
+          {shortcutEditorOpen ? (
+            <div className="fixed inset-0 z-[10002] flex items-end justify-center bg-black/45 p-3 backdrop-blur-sm sm:items-center">
+              <Card className="max-h-[min(78dvh,42rem)] w-full max-w-lg overflow-hidden shadow-overlay" variant="elevated">
+                <CardHeader className="flex flex-row items-start justify-between gap-4 border-b border-line">
+                  <div>
+                    <CardTitle>首页快捷方式</CardTitle>
+                    <CardDescription>只加载你选中的图标。拖到垃圾桶只会移除快捷方式，不会卸载或关闭应用。</CardDescription>
+                  </div>
+                  <Button size="icon-sm" variant="ghost" aria-label="关闭快捷方式设置" onClick={() => setShortcutEditorOpen(false)}><X /></Button>
+                </CardHeader>
+                <div className="max-h-[calc(min(78dvh,42rem)-8rem)] overflow-y-auto p-3">
+                  <div className="grid grid-cols-1 gap-1.5">
+                    {applicationCatalog.map((app) => {
+                      const active = (shortcutKeys ?? shortcutApps.map((item) => item.appKey)).includes(app.appKey);
+                      return (
+                        <button
+                          key={app.appKey}
+                          type="button"
+                          className={cn("flex min-h-12 items-center gap-3 rounded-control px-3 text-left transition-colors", active ? "bg-selected" : "hover:bg-quiet")}
+                          onClick={() => toggleShortcut(app.appKey)}
+                        >
+                          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-inset text-xs font-semibold text-muted">{app.appName.slice(0, 2)}</span>
+                          <span className="min-w-0 flex-1 truncate text-sm text-ink">{app.appName}</span>
+                          <span className={cn("text-xs", active ? "text-primary" : "text-muted")}>{active ? "已添加" : "添加"}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="flex items-center justify-between border-t border-line px-4 py-3">
+                  <span className="text-xs text-muted">已选 {shortcutApps.length} 个</span>
+                  <Button variant="primary" onClick={() => setShortcutEditorOpen(false)}>完成</Button>
+                </div>
+              </Card>
+            </div>
+          ) : null}
         </section>
       ) : null}
 
@@ -420,12 +539,12 @@ export default function App() {
             </div>
           ) : null}
 
-          <FullscreenDock>
+          <FullscreenDock defaultVisible>
             <DockAction label="返回首页" onClick={exitToHome}><ArrowLeft className="size-6" /></DockAction>
             <DockSeparator />
             <DockAction label="应用画板" onClick={() => setViewMode("apps")}><Grid2X2 className="size-6" /></DockAction>
             <DockSeparator />
-            <DockAction label="返回完整应用" onClick={() => setViewMode("app")} className="size-14 rounded-[1.15rem] bg-white p-1 hover:bg-white">
+            <DockAction label="返回完整应用" onClick={openSelectedApp} className="size-14 rounded-[1.15rem] bg-white p-1 hover:bg-white">
               <AppIcon target={selectedApp} className="size-full rounded-[0.9rem]" />
             </DockAction>
             {profile?.regions.length ? (
@@ -436,6 +555,19 @@ export default function App() {
             {!editing ? <DockAction label="添加区域" onClick={beginRegion}><Plus className="size-6" /></DockAction> : null}
           </FullscreenDock>
         </section>
+      ) : null}
+
+      {viewMode === "codex" && selectedApp && profile ? (
+        <CodexMobileView
+          target={selectedApp}
+          profile={profile}
+          stream={stream}
+          remote={remote}
+          onError={handleRemoteError}
+          onBack={exitToHome}
+          onOpenRegions={() => setViewMode("regions")}
+          onOpenMouseMode={() => setViewMode("app")}
+        />
       ) : null}
 
       {viewMode === "app" && selectedApp ? (
@@ -450,7 +582,11 @@ export default function App() {
             <DockAction label={selectedApp.appName || selectedApp.title} className="size-14 rounded-[1.15rem] bg-white p-1 hover:bg-white">
               <AppIcon target={selectedApp} className="size-full rounded-[0.9rem]" />
             </DockAction>
-            <DockAction label="交互区域" onClick={() => setViewMode("regions")}><PanelsTopLeft className="size-6" /></DockAction>
+            {isCodexTarget(selectedApp) ? (
+              <DockAction label="Codex 手机适配" onClick={() => setViewMode("codex")}><PanelsTopLeft className="size-6" /></DockAction>
+            ) : (
+              <DockAction label="交互区域" onClick={() => setViewMode("regions")}><PanelsTopLeft className="size-6" /></DockAction>
+            )}
           </FullscreenDock>
         </section>
       ) : null}

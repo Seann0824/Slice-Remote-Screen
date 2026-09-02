@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useRef, useState, type CompositionEvent, type FormEvent, type KeyboardEvent, type PointerEvent, type WheelEvent } from "react";
 import { mapRegionDelta, mapRegionPoint, type NormalizedRegion, type PointerControl, type PointerGesture, type RemoteTarget } from "@slice/protocol";
 import { Badge, Button, Skeleton, cn } from "@slice/design-system";
-import { LocateFixed, Minus, Plus } from "lucide-react";
-import { hostApi } from "../api";
+import { Hand, HelpCircle, LocateFixed, Lock, LockOpen, Minus, MousePointer2, Plus, RotateCcw } from "lucide-react";
+import { useRemoteClient } from "../remote-client-context";
+import type { RemoteClient } from "../remote-client";
 import type { RemoteStream } from "./use-remote-stream";
+import {
+  DEFAULT_VIEWPORT,
+  filterScrollAxis,
+  moveTrackpadCursor,
+  shouldSuppressSyntheticTouch,
+  touchCenter,
+  touchDistance,
+  type RemoteInteractionMode,
+  type ViewportTransform,
+  zoomViewportAround,
+} from "./remote-interaction";
 
 export const FULL_REGION: NormalizedRegion = {
   id: "full", name: "完整画面", x: 0, y: 0, width: 1, height: 1, rotation: 0,
@@ -24,9 +36,15 @@ type RemoteCanvasProps = {
   disabled?: boolean;
   inputChannel?: RemoteInputChannel | null;
   allowMultiTouchScroll?: boolean;
+  /** Show zoom/lock controls even when the canvas is embedded in a layout. */
+  showViewportControls?: boolean;
+  /** Adapter-specific starting mode; mouse mode remains available in full view. */
+  initialInteractionMode?: RemoteInteractionMode;
+  /** How the cropped canvas should fit its container. */
+  fit?: "contain" | "cover";
 };
 
-export type RemoteInputChannel = ReturnType<typeof hostApi.inputStream>;
+export type RemoteInputChannel = ReturnType<RemoteClient["inputStream"]>;
 
 type SelectionHandle = "nw" | "ne" | "sw" | "se";
 type SelectionGesture = {
@@ -46,14 +64,19 @@ type SelectionPinch = {
 };
 type RemoteGesture = {
   pointerId: number;
+  pointerType: string;
+  interactionMode: RemoteInteractionMode;
   button: "left" | "right" | "middle";
   startedAt: number;
   startClientX: number;
   startClientY: number;
+  originClientX: number;
+  originClientY: number;
   points: { x: number; y: number }[];
   moved: boolean;
   longPressed: boolean;
   realtimeStarted: boolean;
+  trackpadDrag: boolean;
 };
 
 function pointInSurface(event: PointerEvent<HTMLDivElement>) {
@@ -110,7 +133,11 @@ export function RemoteCanvas({
   disabled = false,
   inputChannel,
   allowMultiTouchScroll = true,
+  showViewportControls = false,
+  initialInteractionMode,
+  fit = "contain",
 }: RemoteCanvasProps) {
+  const remote = useRemoteClient();
   const [isActing, setIsActing] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mobileInputRef = useRef<HTMLTextAreaElement>(null);
@@ -126,16 +153,41 @@ export function RemoteCanvas({
   const activeSelection = useRef<NormalizedRegion | null>(selection);
   const selectionCameraRef = useRef<SelectionCamera>({ x: 0, y: 0, zoom: 1 });
   const [selectionCamera, setSelectionCamera] = useState(selectionCameraRef.current);
+  const [interactionMode, setInteractionMode] = useState<RemoteInteractionMode>(() => {
+    if (initialInteractionMode) return initialInteractionMode;
+    if (typeof window === "undefined") return "touch";
+    return window.localStorage.getItem("slice.remote.interaction-mode") === "mouse" ? "mouse" : "touch";
+  });
+  const [canvasLocked, setCanvasLocked] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("slice.remote.canvas-locked") === "true";
+  });
+  const [showInteractionHelp, setShowInteractionHelp] = useState(false);
+  const viewportRef = useRef<ViewportTransform>(DEFAULT_VIEWPORT);
+  const [viewport, setViewport] = useState<ViewportTransform>(DEFAULT_VIEWPORT);
   const remoteGesture = useRef<RemoteGesture | null>(null);
   const longPressTimer = useRef<number | null>(null);
   const wheelTimer = useRef<number | null>(null);
   const wheelGesture = useRef<{ x: number; y: number; deltaX: number; deltaY: number } | null>(null);
-  const inputStreamRef = useRef<ReturnType<typeof hostApi.inputStream> | null>(null);
+  const inputStreamRef = useRef<RemoteInputChannel | null>(null);
   const realtimeMoveRef = useRef<PointerControl | null>(null);
   const realtimeFrameRef = useRef<number | null>(null);
   const lastTapRef = useRef<{ at: number; x: number; y: number; button: "left" | "right" | "middle" } | null>(null);
   const touchPoints = useRef(new Map<number, { clientX: number; clientY: number }>());
   const touchScroll = useRef<{ lastX: number; lastY: number; x: number; y: number; deltaX: number; deltaY: number } | null>(null);
+  const scrollInertiaTimer = useRef<number | null>(null);
+  const viewportGesture = useRef<{
+    distance: number;
+    anchorX: number;
+    anchorY: number;
+    centerX: number;
+    centerY: number;
+    surfaceRect: { left: number; top: number; width: number; height: number };
+    initial: ViewportTransform;
+  } | null>(null);
+  const trackpadCursor = useRef<{ x: number; y: number } | null>(null);
+  const ignoredTouchIds = useRef(new Set<number>());
+  const lastMouseDown = useRef<{ at: number; x: number; y: number } | null>(null);
   const gestureQueueRef = useRef(Promise.resolve());
   const pendingGesturesRef = useRef(0);
 
@@ -143,16 +195,16 @@ export function RemoteCanvas({
     if (!text) return;
     textQueueRef.current = textQueueRef.current
       .catch(() => undefined)
-      .then(() => hostApi.type(target, text))
+      .then(() => remote.type(target, text))
       .catch((error) => onError(error instanceof Error ? error.message : String(error)));
-  }, [onError, target]);
+  }, [onError, remote, target]);
 
   const enqueueKey = useCallback((key: "enter" | "delete") => {
     textQueueRef.current = textQueueRef.current
       .catch(() => undefined)
-      .then(() => hostApi.key(target, { key, modifiers: [] }))
+      .then(() => remote.key(target, { key, modifiers: [] }))
       .catch((error) => onError(error instanceof Error ? error.message : String(error)));
-  }, [onError, target]);
+  }, [onError, remote, target]);
 
   const handleInputTarget = useCallback((editable: boolean) => {
     if (mobileInputProbeTimerRef.current !== null) {
@@ -176,6 +228,33 @@ export function RemoteCanvas({
   useEffect(() => { activeSelection.current = selection; }, [selection]);
 
   useEffect(() => {
+    viewportRef.current = DEFAULT_VIEWPORT;
+    setViewport(DEFAULT_VIEWPORT);
+    viewportGesture.current = null;
+    trackpadCursor.current = null;
+  }, [region.id, target.id, selectionMode]);
+
+  useEffect(() => {
+    const onBlur = () => {
+      const gesture = remoteGesture.current;
+      if (gesture?.realtimeStarted) {
+        flushRealtimeMove();
+        currentInputChannel()?.send({ type: "up", ...(gesture.points.at(-1) ?? { x: 0.5, y: 0.5 }) });
+      }
+      remoteGesture.current = null;
+      touchPoints.current.clear();
+      touchScroll.current = null;
+      viewportGesture.current = null;
+    };
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onBlur);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onBlur);
+    };
+  });
+
+  useEffect(() => {
     const resetCamera = { x: 0, y: 0, zoom: 1 };
     selectionCameraRef.current = resetCamera;
     setSelectionCamera(resetCamera);
@@ -190,11 +269,12 @@ export function RemoteCanvas({
     if (wheelTimer.current !== null) window.clearTimeout(wheelTimer.current);
     if (realtimeFrameRef.current !== null) window.cancelAnimationFrame(realtimeFrameRef.current);
     if (mobileInputProbeTimerRef.current !== null) window.clearTimeout(mobileInputProbeTimerRef.current);
+    if (scrollInertiaTimer.current !== null) window.clearTimeout(scrollInertiaTimer.current);
   }, []);
 
   useEffect(() => {
     if (inputChannel !== undefined || selectionMode || disabled) return;
-    const channel = hostApi.inputStream(target, onError, handleInputTarget);
+    const channel = remote.inputStream(target, onError, handleInputTarget);
     inputStreamRef.current = channel;
     return () => {
       channel.close();
@@ -205,7 +285,7 @@ export function RemoteCanvas({
       }
       realtimeMoveRef.current = null;
     };
-  }, [disabled, handleInputTarget, inputChannel, onError, selectionMode, target]);
+  }, [disabled, handleInputTarget, inputChannel, onError, remote, selectionMode, target]);
 
   useEffect(() => {
     if (!inputChannel || selectionMode || disabled) return;
@@ -258,18 +338,29 @@ export function RemoteCanvas({
 
   const performGesture = (gesture: PointerGesture) => {
     const input = inputChannel ?? inputStreamRef.current;
-    if (gesture.type === "click" && input) {
-      input.send(gesture);
-      return Promise.resolve();
-    }
     const mappedGesture = gesture.type === "scroll"
       ? { ...gesture, ...mapRegionDelta(region.rotation ?? 0, gesture.deltaX, gesture.deltaY) }
       : gesture;
+    if (input && gesture.type === "click") {
+      input.send(gesture);
+      return Promise.resolve();
+    }
+    if (input && gesture.type === "scroll") {
+      const mappedScroll = mapRegionDelta(region.rotation ?? 0, gesture.deltaX, gesture.deltaY);
+      input.send({
+        type: "scroll",
+        x: gesture.x,
+        y: gesture.y,
+        deltaX: mappedScroll.deltaX,
+        deltaY: mappedScroll.deltaY,
+      });
+      return Promise.resolve();
+    }
     pendingGesturesRef.current += 1;
     setIsActing(true);
     const task = gestureQueueRef.current
       .catch(() => undefined)
-      .then(() => hostApi.gesture(target, mappedGesture))
+      .then(() => remote.gesture(target, mappedGesture))
       .catch((error) => onError(error instanceof Error ? error.message : String(error)))
       .finally(() => {
         pendingGesturesRef.current -= 1;
@@ -401,6 +492,17 @@ export function RemoteCanvas({
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
 
+    if (event.pointerType === "mouse") {
+      lastMouseDown.current = { at: performance.now(), x: event.clientX, y: event.clientY };
+    }
+    if (event.pointerType === "touch" && shouldSuppressSyntheticTouch(
+      lastMouseDown.current,
+      { at: performance.now(), x: event.clientX, y: event.clientY },
+    )) {
+      ignoredTouchIds.current.add(event.pointerId);
+      return;
+    }
+
     if (event.pointerType === "touch") {
       touchPoints.current.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
       if (touchPoints.current.size === 2) {
@@ -412,20 +514,38 @@ export function RemoteCanvas({
           if (last) currentInputChannel()?.send({ type: "up", ...last });
         }
         remoteGesture.current = null;
-        if (!allowMultiTouchScroll) {
-          touchScroll.current = null;
-          return;
-        }
         const values = [...touchPoints.current.values()];
-        const centerX = (values[0]!.clientX + values[1]!.clientX) / 2;
-        const centerY = (values[0]!.clientY + values[1]!.clientY) / 2;
-        const point = canvasPoint(centerX, centerY);
-        if (point) touchScroll.current = { lastX: centerX, lastY: centerY, x: point.x, y: point.y, deltaX: 0, deltaY: 0 };
+        if (allowMultiTouchScroll && !canvasLocked) {
+          const center = touchCenter(values);
+          const rect = event.currentTarget.getBoundingClientRect();
+          viewportGesture.current = {
+            distance: touchDistance(values),
+            anchorX: rect.width > 0 ? (center.x - rect.left) / rect.width : 0.5,
+            anchorY: rect.height > 0 ? (center.y - rect.top) / rect.height : 0.5,
+            centerX: center.x,
+            centerY: center.y,
+            surfaceRect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+            initial: viewportRef.current,
+          };
+        } else {
+          viewportGesture.current = null;
+        }
+        return;
+      }
+      if (touchPoints.current.size === 3) {
+        viewportGesture.current = null;
+        if (allowMultiTouchScroll) {
+          const center = touchCenter(touchPoints.current.values());
+          const point = canvasPoint(center.x, center.y);
+          if (point) touchScroll.current = { lastX: center.x, lastY: center.y, x: point.x, y: point.y, deltaX: 0, deltaY: 0 };
+        }
         return;
       }
     }
 
-    const point = canvasPoint(event.clientX, event.clientY);
+    const point = interactionMode === "mouse" && event.pointerType === "touch"
+      ? (trackpadCursor.current ?? canvasPoint(event.clientX, event.clientY))
+      : canvasPoint(event.clientX, event.clientY);
     if (!point) return;
     const button = event.button === 2 ? "right" : event.button === 1 ? "middle" : "left";
     remoteGesture.current = {
@@ -434,10 +554,16 @@ export function RemoteCanvas({
       startedAt: event.timeStamp,
       startClientX: event.clientX,
       startClientY: event.clientY,
+      originClientX: event.clientX,
+      originClientY: event.clientY,
       points: [point],
       moved: false,
       longPressed: false,
-      realtimeStarted: event.pointerType !== "touch" && Boolean(currentInputChannel()),
+      realtimeStarted: event.pointerType === "mouse" && Boolean(currentInputChannel()),
+      pointerType: event.pointerType,
+      interactionMode,
+      trackpadDrag: interactionMode === "mouse" && event.pointerType === "touch"
+        && Boolean(lastTapRef.current && event.timeStamp - lastTapRef.current.at <= 360),
     };
     if (remoteGesture.current.realtimeStarted) {
       currentInputChannel()?.send({ type: "down", button, ...point });
@@ -452,6 +578,7 @@ export function RemoteCanvas({
   };
 
   const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (ignoredTouchIds.current.has(event.pointerId)) return;
     if (selectionMode && event.pointerType === "touch" && selectionTouches.current.has(event.pointerId)) {
       selectionTouches.current.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
       if (selectionTouches.current.size >= 2 && selectionPinch.current) {
@@ -478,14 +605,33 @@ export function RemoteCanvas({
     if (!selectionMode && event.pointerType === "touch" && touchPoints.current.has(event.pointerId)) {
       touchPoints.current.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
       const scroll = touchScroll.current;
-      if (scroll && touchPoints.current.size >= 2) {
+      if (scroll && touchPoints.current.size >= 3) {
+        const center = touchCenter(touchPoints.current.values());
+        const delta = filterScrollAxis(scroll.lastX - center.x, scroll.lastY - center.y);
+        scroll.deltaX += delta.deltaX;
+        scroll.deltaY += delta.deltaY;
+        scroll.lastX = center.x;
+        scroll.lastY = center.y;
+        event.preventDefault();
+        return;
+      }
+      const viewportGestureState = viewportGesture.current;
+      if (viewportGestureState && touchPoints.current.size >= 2) {
         const values = [...touchPoints.current.values()].slice(0, 2);
-        const centerX = (values[0]!.clientX + values[1]!.clientX) / 2;
-        const centerY = (values[0]!.clientY + values[1]!.clientY) / 2;
-        scroll.deltaX += (scroll.lastX - centerX) * 2;
-        scroll.deltaY += (scroll.lastY - centerY) * 2;
-        scroll.lastX = centerX;
-        scroll.lastY = centerY;
+        const center = touchCenter(values);
+        const nextZoom = Math.min(4, Math.max(1, viewportGestureState.initial.zoom * touchDistance(values) / viewportGestureState.distance));
+        const ratio = nextZoom / viewportGestureState.initial.zoom;
+        const nextWidth = viewportGestureState.surfaceRect.width * ratio;
+        const nextHeight = viewportGestureState.surfaceRect.height * ratio;
+        const nextLeft = center.x - viewportGestureState.anchorX * nextWidth;
+        const nextTop = center.y - viewportGestureState.anchorY * nextHeight;
+        const next = {
+          zoom: nextZoom,
+          x: viewportGestureState.initial.x + nextLeft - viewportGestureState.surfaceRect.left,
+          y: viewportGestureState.initial.y + nextTop - viewportGestureState.surfaceRect.top,
+        };
+        viewportRef.current = next;
+        setViewport(next);
         event.preventDefault();
         return;
       }
@@ -499,15 +645,33 @@ export function RemoteCanvas({
         }
         return;
       }
-      const point = canvasPoint(event.clientX, event.clientY);
+      let point = canvasPoint(event.clientX, event.clientY);
+      if (event.pointerType === "touch" && gesture.interactionMode === "mouse") {
+        const surface = event.currentTarget.getBoundingClientRect();
+        const previousClient = { x: gesture.startClientX, y: gesture.startClientY };
+        const previous = trackpadCursor.current ?? gesture.points.at(-1) ?? { x: 0.5, y: 0.5 };
+        const delta = moveTrackpadCursor(previous, {
+          x: event.clientX - previousClient.x,
+          y: event.clientY - previousClient.y,
+        }, { width: surface.width, height: surface.height });
+        trackpadCursor.current = delta;
+        point = delta;
+        gesture.startClientX = event.clientX;
+        gesture.startClientY = event.clientY;
+      }
       if (!point) return;
-      if (Math.hypot(event.clientX - gesture.startClientX, event.clientY - gesture.startClientY) > 7) {
+      if (Math.hypot(event.clientX - gesture.originClientX, event.clientY - gesture.originClientY) > 7) {
         gesture.moved = true;
         if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
         const input = currentInputChannel();
-        if (event.pointerType !== "mouse" && !gesture.longPressed) {
-          queueRealtimeMove(point);
-        } else if (!gesture.realtimeStarted && input) {
+        if (gesture.interactionMode === "touch" && !gesture.longPressed) {
+          if (!gesture.realtimeStarted && input) {
+            const first = gesture.points[0];
+            if (first) input.send({ type: "down", button: gesture.button, ...first });
+            gesture.realtimeStarted = true;
+          }
+          if (gesture.realtimeStarted) queueRealtimeMove(point);
+        } else if (!gesture.realtimeStarted && input && (gesture.trackpadDrag || event.pointerType === "mouse")) {
           const first = gesture.points[0];
           if (first) input.send({ type: "down", button: gesture.button, ...first });
           gesture.realtimeStarted = true;
@@ -560,25 +724,37 @@ export function RemoteCanvas({
   const handlePointerUp = (event: PointerEvent<HTMLDivElement>) => {
     if (!selectionMode) {
       if (longPressTimer.current !== null) window.clearTimeout(longPressTimer.current);
-      if (event.pointerType === "touch") {
-        const wasScrolling = Boolean(touchScroll.current);
+      if (ignoredTouchIds.current.has(event.pointerId)) {
+        ignoredTouchIds.current.delete(event.pointerId);
         touchPoints.current.delete(event.pointerId);
-        if (wasScrolling) {
+        return;
+      }
+      if (event.pointerType === "touch") {
+        touchPoints.current.delete(event.pointerId);
+        if (touchScroll.current) {
           const scroll = touchScroll.current;
-          if (scroll && touchPoints.current.size < 2) {
+          if (touchPoints.current.size < 3) {
             touchScroll.current = null;
             if (Math.abs(scroll.deltaX) + Math.abs(scroll.deltaY) > 3) {
               void performGesture({ type: "scroll", x: scroll.x, y: scroll.y, deltaX: scroll.deltaX, deltaY: scroll.deltaY });
+              startScrollInertia(scroll);
             }
           }
           remoteGesture.current = null;
+          return;
+        }
+        if (viewportGesture.current && touchPoints.current.size < 2) {
+          viewportGesture.current = null;
           return;
         }
       }
       const gesture = remoteGesture.current;
       if (!gesture || gesture.pointerId !== event.pointerId) return;
       remoteGesture.current = null;
-      const finalPoint = canvasPoint(event.clientX, event.clientY);
+      const finalPointAtPointer = canvasPoint(event.clientX, event.clientY);
+      const finalPoint = gesture.interactionMode === "mouse" && event.pointerType === "touch"
+        ? (trackpadCursor.current ?? finalPointAtPointer)
+        : finalPointAtPointer;
       if (gesture.realtimeStarted) {
         if (finalPoint) {
           const previous = gesture.points.at(-1);
@@ -596,9 +772,17 @@ export function RemoteCanvas({
         if (finalPoint) performClick(finalPoint, "right", 1);
         return;
       }
-      if (event.pointerType !== "mouse" && gesture.moved && !gesture.longPressed) {
+      if (gesture.interactionMode === "touch" && gesture.moved && !gesture.longPressed && !gesture.realtimeStarted) {
         if (finalPoint) queueRealtimeMove(finalPoint);
         flushRealtimeMove();
+        if (finalPoint) {
+          void performGesture({
+            type: "drag",
+            button: gesture.button,
+            points: gesture.points.slice(0, 64),
+            durationMs: Math.min(5_000, Math.max(40, Math.round(event.timeStamp - gesture.startedAt))),
+          });
+        }
         return;
       }
       if (finalPoint && gesture.moved) {
@@ -613,7 +797,11 @@ export function RemoteCanvas({
         });
       } else if (finalPoint) {
         const lastTap = lastTapRef.current;
-        const isDoubleTap = event.pointerType === "touch"
+        const isDoubleTap = gesture.interactionMode === "mouse"
+          ? lastTapRef.current?.button === gesture.button
+            && event.timeStamp - lastTapRef.current.at <= 360
+            && Math.hypot(finalPoint.x - lastTapRef.current.x, finalPoint.y - lastTapRef.current.y) <= 0.05
+          : event.pointerType === "touch"
           && gesture.button === "left"
           && lastTap?.button === gesture.button
           && event.timeStamp - lastTap.at <= 360
@@ -670,6 +858,8 @@ export function RemoteCanvas({
       remoteGesture.current = null;
       touchPoints.current.clear();
       touchScroll.current = null;
+      viewportGesture.current = null;
+      ignoredTouchIds.current.clear();
       return;
     }
     const gesture = selectionGesture.current;
@@ -699,16 +889,28 @@ export function RemoteCanvas({
       return;
     }
     if (disabled || !stream.hasFrame) return;
-    if (event.ctrlKey || event.metaKey) return;
     event.preventDefault();
     event.stopPropagation();
+    if (event.ctrlKey || event.metaKey) {
+      const surface = event.currentTarget.getBoundingClientRect();
+      const next = zoomViewportAround(
+        viewportRef.current,
+        viewportRef.current.zoom * Math.exp(-event.deltaY * 0.002),
+        { x: event.clientX, y: event.clientY },
+        surface,
+      );
+      viewportRef.current = next;
+      setViewport(next);
+      return;
+    }
     const point = canvasPoint(event.clientX, event.clientY);
     if (!point) return;
     const current = wheelGesture.current ?? { ...point, deltaX: 0, deltaY: 0 };
     current.x = point.x;
     current.y = point.y;
-    current.deltaX += event.deltaX;
-    current.deltaY += event.deltaY;
+    const filtered = filterScrollAxis(event.deltaX, event.deltaY);
+    current.deltaX += filtered.deltaX;
+    current.deltaY += filtered.deltaY;
     wheelGesture.current = current;
     if (wheelTimer.current !== null) window.clearTimeout(wheelTimer.current);
     wheelTimer.current = window.setTimeout(() => {
@@ -752,6 +954,41 @@ export function RemoteCanvas({
     enqueueKey("enter");
   };
 
+  const updateInteractionMode = (mode: RemoteInteractionMode) => {
+    setInteractionMode(mode);
+    window.localStorage.setItem("slice.remote.interaction-mode", mode);
+    trackpadCursor.current = null;
+  };
+
+  const updateCanvasLocked = (locked: boolean) => {
+    setCanvasLocked(locked);
+    window.localStorage.setItem("slice.remote.canvas-locked", String(locked));
+  };
+
+  const updateViewport = (next: ViewportTransform) => {
+    viewportRef.current = next;
+    setViewport(next);
+  };
+
+  const resetViewport = () => updateViewport(DEFAULT_VIEWPORT);
+
+  const startScrollInertia = (scroll: { x: number; y: number; deltaX: number; deltaY: number }) => {
+    if (scrollInertiaTimer.current !== null) window.clearTimeout(scrollInertiaTimer.current);
+    let velocityX = Math.min(18, Math.max(-18, scroll.deltaX * 0.12));
+    let velocityY = Math.min(18, Math.max(-18, scroll.deltaY * 0.12));
+    const tick = () => {
+      velocityX *= 0.84;
+      velocityY *= 0.84;
+      if (Math.abs(velocityX) < 0.5 && Math.abs(velocityY) < 0.5) {
+        scrollInertiaTimer.current = null;
+        return;
+      }
+      void performGesture({ type: "scroll", x: scroll.x, y: scroll.y, deltaX: velocityX, deltaY: velocityY });
+      scrollInertiaTimer.current = window.setTimeout(tick, 32);
+    };
+    scrollInertiaTimer.current = window.setTimeout(tick, 32);
+  };
+
   return (
     <div className={cn("flex flex-col", fillViewport ? "h-dvh" : fillContainer ? "h-full" : "gap-2")}>
       <textarea
@@ -786,11 +1023,15 @@ export function RemoteCanvas({
           style={selectionMode ? {
             transform: `translate3d(${selectionCamera.x}px, ${selectionCamera.y}px, 0) scale(${selectionCamera.zoom})`,
             transformOrigin: "top left",
-          } : undefined}
+          } : {
+            transform: `translate3d(${viewport.x}px, ${viewport.y}px, 0) scale(${viewport.zoom})`,
+            transformOrigin: "top left",
+          }}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerCancel}
+          onLostPointerCapture={handlePointerCancel}
           onWheel={handleWheel}
           onContextMenu={(event) => event.preventDefault()}
         >
@@ -800,7 +1041,9 @@ export function RemoteCanvas({
             aria-label={`${target.title} · ${region.name}`}
             className={cn(
               selectionMode ? "cursor-crosshair" : disabled ? "cursor-default" : "cursor-pointer",
-              fillViewport || fillContainer ? "h-auto max-h-full w-auto max-w-full" : "h-auto w-full",
+              fillViewport || fillContainer
+                ? fit === "cover" ? "h-full w-full object-cover" : "h-auto max-h-full w-auto max-w-full"
+                : "h-auto w-full",
             )}
           />
           {selection ? (
@@ -850,6 +1093,64 @@ export function RemoteCanvas({
             </>
           ) : null}
         </div>
+        {!selectionMode && (fillViewport || showViewportControls) && !disabled ? (
+          <>
+            <div className="absolute left-3 top-3 z-30 flex items-center gap-1 rounded-full border border-white/15 bg-ink/85 p-1 shadow-overlay backdrop-blur" data-canvas-control>
+              <Button
+                type="button"
+                size="icon-sm"
+                variant="ghost"
+                className="text-white hover:bg-white/15"
+                aria-label="打开远程交互帮助"
+                onClick={() => setShowInteractionHelp((value) => !value)}
+              >
+                {interactionMode === "touch" ? <Hand className="size-4" /> : <MousePointer2 className="size-4" />}
+              </Button>
+              <span className="px-1 text-[11px] font-medium text-white/80">{interactionMode === "touch" ? "触控" : "触控板"}</span>
+              <Button
+                type="button"
+                size="icon-sm"
+                variant="ghost"
+                className="text-white hover:bg-white/15"
+                aria-label={canvasLocked ? "解锁画布" : "锁定画布"}
+                onClick={() => updateCanvasLocked(!canvasLocked)}
+              >
+                {canvasLocked ? <Lock className="size-4" /> : <LockOpen className="size-4" />}
+              </Button>
+              {viewport.zoom !== 1 || viewport.x !== 0 || viewport.y !== 0 ? (
+                <Button type="button" size="icon-sm" variant="ghost" className="text-white hover:bg-white/15" aria-label="重置画布" onClick={resetViewport}>
+                  <RotateCcw className="size-4" />
+                </Button>
+              ) : null}
+            </div>
+            {showInteractionHelp ? (
+              <div className="absolute inset-x-3 bottom-3 z-30 max-w-md rounded-sheet border border-white/15 bg-ink/95 p-4 text-white shadow-overlay backdrop-blur-xl" data-canvas-control>
+                <div className="mb-3 flex items-center justify-between">
+                  <div>
+                    <p className="text-body-sm font-semibold">远程交互</p>
+                    <p className="text-label text-white/55">RustDesk 风格手势映射</p>
+                  </div>
+                  <HelpCircle className="size-5 text-white/55" />
+                </div>
+                <div className="mb-3 grid grid-cols-2 gap-2">
+                  <Button type="button" size="sm" variant={interactionMode === "touch" ? "primary" : "secondary"} onClick={() => updateInteractionMode("touch")}>直接触控</Button>
+                  <Button type="button" size="sm" variant={interactionMode === "mouse" ? "primary" : "secondary"} onClick={() => updateInteractionMode("mouse")}>触控板</Button>
+                </div>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-label text-white/75">
+                  {interactionMode === "touch" ? <>
+                    <span>单指点击 · 左键</span><span>长按 · 右键</span>
+                    <span>单指移动 · 拖拽</span><span>双指移动/捏合 · 画布</span>
+                    <span>三指上下 · 滚轮</span><span>锁定 · 禁止画布移动</span>
+                  </> : <>
+                    <span>单指移动 · 移动光标</span><span>点击 · 当前光标左键</span>
+                    <span>双击后移动 · 拖拽</span><span>长按/双指点按 · 右键</span>
+                    <span>三指上下 · 滚轮</span><span>双指移动/捏合 · 画布</span>
+                  </>}
+                </div>
+              </div>
+            ) : null}
+          </>
+        ) : null}
         {selectionMode ? (
           <div className="absolute bottom-3 right-3 z-20 flex items-center gap-1 rounded-full border border-white/15 bg-ink/85 p-1 shadow-overlay backdrop-blur" data-canvas-control>
             <Button

@@ -77,7 +77,7 @@ export class NativeHost {
         "--output",
         output,
         "--size",
-        "128",
+        "64",
       ]);
       return await readFile(output);
     } finally {

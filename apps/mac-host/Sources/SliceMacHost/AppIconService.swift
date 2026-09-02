@@ -3,11 +3,15 @@ import Foundation
 
 enum AppIconService {
     @MainActor
-    static func write(bundleIdentifier: String, outputPath: String, size: Int) throws {
-        guard let applicationURL = NSWorkspace.shared.urlForApplication(
-            withBundleIdentifier: bundleIdentifier
-        ) else {
-            throw HostError.applicationNotFound(bundleIdentifier)
+    static func data(bundleIdentifier: String?, applicationPath: String?, size: Int) throws -> Data {
+        let applicationURL: URL
+        if let bundleIdentifier,
+           let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+            applicationURL = url
+        } else if let applicationPath {
+            applicationURL = URL(fileURLWithPath: applicationPath)
+        } else {
+            throw HostError.applicationNotFound(bundleIdentifier ?? applicationPath ?? "unknown")
         }
 
         let dimension = max(32, min(size, 512))
@@ -26,8 +30,14 @@ enum AppIconService {
         guard let tiff = resized.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiff),
               let png = bitmap.representation(using: .png, properties: [:]) else {
-            throw HostError.imageDestinationFailed(outputPath)
+            throw HostError.imageDestinationFailed(bundleIdentifier ?? applicationPath ?? "unknown")
         }
-        try png.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
+        return png
+    }
+
+    @MainActor
+    static func write(bundleIdentifier: String, outputPath: String, size: Int) throws {
+        try data(bundleIdentifier: bundleIdentifier, applicationPath: nil, size: size)
+            .write(to: URL(fileURLWithPath: outputPath), options: .atomic)
     }
 }

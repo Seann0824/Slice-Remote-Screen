@@ -106,6 +106,11 @@ export const pointerControlSchema = z.discriminatedUnion("type", [
   pointerControlPointSchema.extend({ type: z.literal("move") }),
   pointerControlPointSchema.extend({ type: z.literal("up") }),
   pointerControlPointSchema.extend({
+    type: z.literal("scroll"),
+    deltaX: z.number().finite().min(-4_000).max(4_000),
+    deltaY: z.number().finite().min(-4_000).max(4_000),
+  }),
+  pointerControlPointSchema.extend({
     type: z.literal("click"),
     button: pointerButtonSchema.default("left"),
     clickCount: z.number().int().min(1).max(2).default(1),

@@ -9,11 +9,11 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
-  Input,
 } from "@slice/design-system";
-import { CircleAlert, MonitorUp, Unplug } from "lucide-react";
+import { CircleAlert, MonitorUp, Power } from "lucide-react";
 import { hostApi } from "../api";
-import { loadIceServers, signalingWebSocketUrl } from "./signaling";
+import { loadIceServers, signalingSession, signalingWebSocketUrl } from "./signaling";
+import { AccountLoginCard } from "./AccountLoginCard";
 
 type SignalMessage =
   | { type: "host.accepted" }
@@ -28,25 +28,17 @@ type ControlMessage =
   | { type: "type"; text: string }
   | { type: "key"; value: KeyRequest };
 
-const credentialStorageKey = "slice-remote-screen.host-device-token-v1";
+const remoteEnabledStorageKey = "slice-remote-screen.remote-enabled-v1";
 
-function initialCredential() {
-  const url = new URL(window.location.href);
-  const urlToken = url.searchParams.get("token");
-  if (urlToken) {
-    window.localStorage.setItem(credentialStorageKey, urlToken);
-    url.searchParams.delete("token");
-    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-  }
-  return urlToken || window.localStorage.getItem(credentialStorageKey) || "";
+function initialRemoteEnabled() {
+  const stored = window.localStorage.getItem(remoteEnabledStorageKey);
+  return stored === null ? true : stored === "true";
 }
 
 export function P2pHostScreen() {
-  const [token, setToken] = useState(initialCredential);
-  const [savedCredential, setSavedCredential] = useState(initialCredential);
-  const [status, setStatus] = useState(
-    token ? "正在自动连接信令服务…" : "粘贴一次设备密钥，之后会自动上线",
-  );
+  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [remoteEnabled, setRemoteEnabled] = useState(initialRemoteEnabled);
+  const [status, setStatus] = useState("正在验证 Slice 账号…");
   const [error, setError] = useState("");
   const [target, setTarget] = useState<RemoteTarget | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -56,10 +48,41 @@ export function P2pHostScreen() {
   const stopFramesRef = useRef<(() => void) | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const connectRef = useRef<
-    (display: RemoteTarget, credential: string) => void
+    (display: RemoteTarget) => void
   >(() => undefined);
 
+  function stopRemote(status = "远程控制已关闭") {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    stopFramesRef.current?.();
+    stopFramesRef.current = null;
+    socketRef.current?.close(1000, "Remote control disabled");
+    socketRef.current = null;
+    peerRef.current?.close();
+    peerRef.current = null;
+    pendingCandidates.current = [];
+    setStatus(status);
+  }
+
   useEffect(() => {
+    let cancelled = false;
+    void signalingSession()
+      .then((session) => {
+        if (!cancelled) setAuthenticated(Boolean(session));
+      })
+      .catch((reason) => {
+        if (!cancelled) {
+          setAuthenticated(false);
+          setError(reason instanceof Error ? reason.message : String(reason));
+        }
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (authenticated !== true) return;
     let cancelled = false;
     void Promise.all([hostApi.permissions(), hostApi.targets()])
       .then(([permissions, targets]) => {
@@ -76,13 +99,9 @@ export function P2pHostScreen() {
       );
     return () => {
       cancelled = true;
-      if (reconnectTimerRef.current !== null)
-        window.clearTimeout(reconnectTimerRef.current);
-      stopFramesRef.current?.();
-      socketRef.current?.close(1000, "Host closed");
-      peerRef.current?.close();
+      stopRemote("Host closed");
     };
-  }, []);
+  }, [authenticated]);
 
   function sendSignal(message: SignalMessage) {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
@@ -105,7 +124,7 @@ export function P2pHostScreen() {
     if (!canvas) throw new Error("屏幕画面尚未准备好");
     peerRef.current?.close();
     pendingCandidates.current = [];
-    const iceServers = await loadIceServers(savedCredential);
+    const iceServers = await loadIceServers();
     const peer = new RTCPeerConnection({ iceServers });
     peerRef.current = peer;
     const stream = canvas.captureStream(30);
@@ -227,7 +246,8 @@ export function P2pHostScreen() {
     };
   }
 
-  function connect(display: RemoteTarget, credential: string) {
+  function connect(display: RemoteTarget) {
+    if (!remoteEnabled) return;
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -240,8 +260,7 @@ export function P2pHostScreen() {
     socketRef.current = socket;
     let authenticated = false;
     socket.onopen = () => {
-      setStatus("正在验证 Mac 绑定…");
-      socket.send(JSON.stringify({ type: "host.auth", token: credential }));
+      setStatus("正在连接 Slice 服务…");
     };
     socket.onmessage = (event) => {
       const message = JSON.parse(String(event.data)) as SignalMessage;
@@ -251,17 +270,18 @@ export function P2pHostScreen() {
       });
     };
     socket.onerror = () => {
-      if (!authenticated) setError("设备密钥无效或信令服务不可用");
+      if (!authenticated) setError("账号会话无效或信令服务不可用");
     };
     socket.onclose = (event) => {
       if (socketRef.current !== socket || event.code === 1000) return;
       if (!authenticated) {
-        setStatus("绑定失败，请重新生成设备密钥");
+        setAuthenticated(false);
+        setStatus("账号会话已失效，请重新登录");
         return;
       }
       setStatus("与信令服务断开，正在重连…");
       reconnectTimerRef.current = window.setTimeout(
-        () => connectRef.current(display, credential),
+        () => connectRef.current(display),
         3000,
       );
     };
@@ -269,35 +289,27 @@ export function P2pHostScreen() {
   connectRef.current = connect;
 
   useEffect(() => {
-    if (target && savedCredential.trim()) {
-      connectRef.current(target, savedCredential.trim());
+    if (authenticated !== true) return;
+    if (!remoteEnabled) {
+      stopRemote();
+    } else if (target) {
+      connectRef.current(target);
     }
-  }, [savedCredential, target]);
+  }, [authenticated, remoteEnabled, target]);
 
-  function saveCredential() {
-    const credential = token.trim();
-    if (!credential) {
-      setError("先输入 Mac 绑定密钥");
-      return;
-    }
-    window.localStorage.setItem(credentialStorageKey, credential);
-    setToken(credential);
-    if (savedCredential === credential && target) {
-      connectRef.current(target, credential);
-    } else {
-      setSavedCredential(credential);
-    }
+  function toggleRemoteControl() {
+    const next = !remoteEnabled;
+    window.localStorage.setItem(remoteEnabledStorageKey, String(next));
+    setRemoteEnabled(next);
+    if (!next) stopRemote();
   }
 
-  function clearCredential() {
-    window.localStorage.removeItem(credentialStorageKey);
-    setToken("");
-    setSavedCredential("");
-    socketRef.current?.close(1000, "Binding cleared");
-    peerRef.current?.close();
-    peerRef.current = null;
-    setError("");
-    setStatus("绑定已清除，请输入新的 Mac 绑定密钥");
+  if (authenticated === false) {
+    return (
+      <main className="mx-auto flex min-h-dvh w-full max-w-3xl items-center bg-canvas p-4 sm:p-8">
+        <AccountLoginCard onAuthenticated={() => { setError(""); setAuthenticated(true); }} />
+      </main>
+    );
   }
 
   return (
@@ -307,26 +319,27 @@ export function P2pHostScreen() {
           <MonitorUp className="mb-2 size-8 text-muted" />
           <CardTitle>连接 Slice 服务</CardTitle>
           <CardDescription>
-            绑定一次后，这台 Mac 每次启动都会自动上线。
+            登录 Slice 账号后，这台 Mac 会自动上线。
           </CardDescription>
         </CardHeader>
         <div className="flex flex-col gap-3 p-5 pt-0">
-          <Input
-            type="password"
-            value={token}
-            onChange={(event) => setToken(event.target.value)}
-            placeholder="Mac 绑定密钥"
-            autoComplete="off"
-          />
-          <Button onClick={saveCredential} disabled={!target}>
-            保存并上线
-          </Button>
-          {savedCredential ? (
-            <Button variant="danger" onClick={clearCredential}>
-              <Unplug />
-              清除绑定
+          <div className="flex items-center justify-between gap-3 rounded-control border border-line bg-inset px-3 py-2">
+            <div className="min-w-0">
+              <p className="m-0 text-body-sm font-medium">远程控制</p>
+              <p className="m-0 text-xs text-muted">
+                {remoteEnabled ? "允许手机连接和控制这台 Mac" : "已断开连接，不共享画面和输入"}
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant={remoteEnabled ? "primary" : "secondary"}
+              aria-pressed={remoteEnabled}
+              onClick={toggleRemoteControl}
+            >
+              <Power data-icon="inline-start" />
+              {remoteEnabled ? "已开启" : "已关闭"}
             </Button>
-          ) : null}
+          </div>
           <p className="m-0 text-body-sm text-muted" role="status">
             {status}
           </p>

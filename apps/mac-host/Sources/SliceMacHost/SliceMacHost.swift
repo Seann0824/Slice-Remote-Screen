@@ -7,10 +7,25 @@ import Foundation
 @MainActor
 struct SliceMacHost {
     static func main() async {
+        if CommandLine.arguments.count == 1,
+           let bundleIdentifier = Bundle.main.bundleIdentifier,
+           let existing = NSRunningApplication.runningApplications(
+               withBundleIdentifier: bundleIdentifier
+           ).first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
+            existing.activate(options: [.activateAllWindows])
+            return
+        }
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
 
         do {
+            if CommandLine.arguments.count == 1 {
+                let delegate = NativeAppDelegate()
+                application.delegate = delegate
+                application.setActivationPolicy(.regular)
+                application.run()
+                return
+            }
             let arguments = try Arguments(Array(CommandLine.arguments.dropFirst()))
             try await run(arguments)
         } catch {
@@ -24,10 +39,7 @@ struct SliceMacHost {
         switch arguments.command {
         case "permissions":
             if arguments.hasFlag("request") {
-                _ = CGRequestScreenCaptureAccess()
-                _ = AXIsProcessTrustedWithOptions(
-                    ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-                )
+                requestPermissions()
             }
             try printJSON(PermissionState(
                 screenRecording: await TargetCatalog.canCapture(),
@@ -117,6 +129,28 @@ struct SliceMacHost {
         default:
             throw HostError.invalidArguments(Arguments.usage)
         }
+    }
+
+    static func requestPermissions() {
+        if !CGPreflightScreenCaptureAccess() {
+            _ = CGRequestScreenCaptureAccess()
+            openPrivacySettings(pane: "Privacy_ScreenCapture")
+        }
+        if !AXIsProcessTrusted() {
+            _ = AXIsProcessTrustedWithOptions(
+                ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+            )
+            if CGPreflightScreenCaptureAccess() {
+                openPrivacySettings(pane: "Privacy_Accessibility")
+            }
+        }
+    }
+
+    static func openPrivacySettings(pane: String) {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") else {
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     static func printJSON<T: Encodable>(_ value: T) throws {

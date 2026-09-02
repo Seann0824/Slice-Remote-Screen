@@ -12,10 +12,12 @@ services:
       SIGNALING_HOST: 0.0.0.0
       SIGNALING_PORT: 8787
       SIGNALING_DATA_FILE: /data/device.json
+      SIGNALING_ACCOUNTS_FILE: /data/accounts.json
+      SIGNALING_SESSIONS_FILE: /data/sessions.json
     volumes:
       - signaling-data:/data
     ports:
-      - "8787:8787"
+      - "${SIGNALING_PUBLISHED_PORT:-8787}:8787"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s
@@ -25,18 +27,35 @@ services:
   turn:
     image: coturn/coturn:4.6.3
     restart: unless-stopped
+    # Relay ports are dynamically allocated. Host networking keeps the
+    # advertised relay port identical to the port reachable from the WAN;
+    # bridge NAT otherwise breaks off-LAN connections.
+    network_mode: host
     env_file:
       - .env.server
-    entrypoint: ["/bin/sh", "-c"]
-    command: >-
-      turnserver --no-cli --no-tls --no-dtls --fingerprint --lt-cred-mech
-      --use-auth-secret --static-auth-secret="$${TURN_SECRET}"
-      --realm="$${TURN_REALM:-slice.example.com}"
-      --external-ip="$${TURN_EXTERNAL_IP}"
-      --min-port=49160 --max-port=49260
-    ports:
-      - "3478:3478/udp"
-      - "49160-49260:49160-49260/udp"
+    # Use the image entrypoint directly. Wrapping turnserver in `sh -c` makes
+    # Compose pass the remaining options as positional parameters, silently
+    # dropping the TURN port/auth/NAT settings.
+    command:
+      - -n
+      - --no-cli
+      - --verbose
+      - --simple-log
+      - --log-file=stdout
+      - --no-tls
+      - --no-dtls
+      - --fingerprint
+      - --lt-cred-mech
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET}
+      - --realm=${TURN_REALM:-slice.example.com}
+      - --external-ip=${TURN_EXTERNAL_IP}
+      - --listening-ip=${TURN_LISTENING_IP:-0.0.0.0}
+      - --relay-ip=${TURN_RELAY_IP:-0.0.0.0}
+      - --listening-port=${TURN_PUBLISHED_PORT:-3478}
+      - --no-multicast-peers
+      - --min-port=49160
+      - --max-port=49260
 
 volumes:
   signaling-data:

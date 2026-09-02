@@ -35,6 +35,7 @@ struct InstalledApplication: Codable, Sendable {
     let bundleIdentifier: String?
     let path: String
     let isRunning: Bool
+    let hasOpenWindow: Bool
 }
 
 struct PointerPoint: Codable, Sendable {
@@ -60,6 +61,26 @@ struct PointerControlRequest: Codable, Sendable {
     let clickCount: Int?
     let x: Double
     let y: Double
+    let deltaX: Double?
+    let deltaY: Double?
+
+    init(
+        type: String,
+        button: String?,
+        clickCount: Int?,
+        x: Double,
+        y: Double,
+        deltaX: Double? = nil,
+        deltaY: Double? = nil
+    ) {
+        self.type = type
+        self.button = button
+        self.clickCount = clickCount
+        self.x = x
+        self.y = y
+        self.deltaX = deltaX
+        self.deltaY = deltaY
+    }
 }
 
 enum HostError: LocalizedError {

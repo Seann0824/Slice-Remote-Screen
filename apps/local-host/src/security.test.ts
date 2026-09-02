@@ -37,6 +37,7 @@ describe("path configuration", () => {
 describe("host content security policy", () => {
   it("allows self-hosted secure signaling endpoints", () => {
     expect(securityHeaders["Content-Security-Policy"]).toContain("wss:");
-    expect(securityHeaders["Content-Security-Policy"]).toContain("ws://127.0.0.1:8787");
+    expect(securityHeaders["Content-Security-Policy"]).toContain("http:");
+    expect(securityHeaders["Content-Security-Policy"]).toContain("ws:");
   });
 });

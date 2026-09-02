@@ -1,31 +1,22 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 type StoredDevice = {
   deviceName: string;
-  tokenHash: string;
-  tokenPrefix: string;
   createdAt: string;
+};
+
+type DeviceFile = {
+  devices: Record<string, StoredDevice>;
 };
 
 export type DeviceInfo = {
   device_name: string;
-  token_prefix: string;
+  created_at: string;
 };
 
-function hashToken(token: string) {
-  return createHash("sha256").update(token).digest("hex");
-}
-
-function sameHash(left: string, right: string) {
-  const leftBuffer = Buffer.from(left, "hex");
-  const rightBuffer = Buffer.from(right, "hex");
-  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
-}
-
 export class DeviceStore {
-  private device: StoredDevice | null = null;
+  private readonly devices = new Map<string, StoredDevice>();
   private loaded = false;
   private writeQueue = Promise.resolve();
 
@@ -35,7 +26,10 @@ export class DeviceStore {
     if (this.loaded) return;
     this.loaded = true;
     try {
-      this.device = JSON.parse(await readFile(this.filePath, "utf8")) as StoredDevice;
+      const value = JSON.parse(await readFile(this.filePath, "utf8")) as DeviceFile;
+      for (const [accountId, device] of Object.entries(value.devices || {})) {
+        this.devices.set(accountId, device);
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
@@ -44,7 +38,8 @@ export class DeviceStore {
   private async persist() {
     await mkdir(dirname(this.filePath), { recursive: true });
     const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
-    await writeFile(temporaryPath, `${JSON.stringify(this.device, null, 2)}\n`, { mode: 0o600 });
+    const value: DeviceFile = { devices: Object.fromEntries(this.devices) };
+    await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
     await rename(temporaryPath, this.filePath);
   }
 
@@ -53,34 +48,29 @@ export class DeviceStore {
     await this.writeQueue;
   }
 
-  async info(): Promise<DeviceInfo | null> {
+  async info(accountId: string): Promise<DeviceInfo | null> {
     await this.ensureLoaded();
-    return this.device
-      ? { device_name: this.device.deviceName, token_prefix: this.device.tokenPrefix }
+    const device = this.devices.get(accountId);
+    return device
+      ? { device_name: device.deviceName, created_at: device.createdAt }
       : null;
   }
 
-  async create(deviceName: string) {
+  async register(accountId: string, deviceName: string) {
     await this.ensureLoaded();
-    const token = randomBytes(32).toString("hex");
-    this.device = {
+    const current = this.devices.get(accountId);
+    if (current?.deviceName === deviceName) return;
+    this.devices.set(accountId, {
       deviceName,
-      tokenHash: hashToken(token),
-      tokenPrefix: token.slice(0, 8),
       createdAt: new Date().toISOString(),
-    };
-    await this.write();
-    return { device_name: deviceName, token, token_prefix: this.device.tokenPrefix };
-  }
-
-  async remove() {
-    await this.ensureLoaded();
-    this.device = null;
+    });
     await this.write();
   }
 
-  async matches(token: string) {
+  async remove(accountId: string) {
     await this.ensureLoaded();
-    return Boolean(this.device && sameHash(this.device.tokenHash, hashToken(token)));
+    this.devices.delete(accountId);
+    await this.write();
   }
+
 }

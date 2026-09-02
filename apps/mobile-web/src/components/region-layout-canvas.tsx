@@ -3,7 +3,7 @@ import type { CanvasRect, NormalizedRegion, RemoteTarget } from "@slice/protocol
 import { Button, cn } from "@slice/design-system";
 import { ChevronLeft, ChevronRight, Crop, LocateFixed, Maximize2, Minimize2, Minus, Plus, RotateCw, Trash2 } from "lucide-react";
 import { RemoteCanvas, type RemoteInputChannel } from "./remote-canvas";
-import { hostApi } from "../api";
+import { useRemoteClient } from "../remote-client-context";
 import type { RemoteStream } from "./use-remote-stream";
 
 type Camera = { x: number; y: number; zoom: number };
@@ -67,6 +67,7 @@ export function RegionLayoutCanvas({
   onError: (message: string) => void;
   fullScreen?: boolean;
 }) {
+  const remote = useRemoteClient();
   const canvasRef = useRef<HTMLDivElement>(null);
   const layoutGestureRef = useRef<LayoutGesture | null>(null);
   const panGestureRef = useRef<PanGesture | null>(null);
@@ -98,13 +99,13 @@ export function RegionLayoutCanvas({
   }, [focusedRegionId, regions]);
 
   useEffect(() => {
-    const channel = hostApi.inputStream(target, onError);
+    const channel = remote.inputStream(target, onError);
     setInputChannel(channel);
     return () => {
       setInputChannel(null);
       channel.close();
     };
-  }, [onError, target]);
+  }, [onError, remote, target]);
 
   const updateLayouts = (next: Record<string, CanvasRect>) => {
     layoutsRef.current = next;

@@ -7,8 +7,13 @@ let package = Package(
     products: [
         .executable(name: "slice-mac-host", targets: ["SliceMacHost"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/stasel/WebRTC.git", exact: "150.0.0")
+    ],
     targets: [
-        .executableTarget(name: "SliceMacHost")
+        .executableTarget(
+            name: "SliceMacHost",
+            dependencies: [.product(name: "WebRTC", package: "WebRTC")]
+        )
     ]
 )
-

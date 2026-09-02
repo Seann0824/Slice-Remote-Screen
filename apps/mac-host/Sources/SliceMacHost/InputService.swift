@@ -3,6 +3,11 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
+struct PointerControlState {
+    var activeButton: String?
+    var lastPoint: CGPoint?
+}
+
 enum InputService {
     static func activate(_ target: ResolvedTarget) async throws {
         guard let processID = target.processID,
@@ -101,6 +106,12 @@ enum InputService {
             case "move":
                 let eventType = try activeButton.map { try mouseTypes($0).dragged } ?? .mouseMoved
                 try postPointer(type: eventType, at: point, button: activeButton ?? "left")
+            case "scroll":
+                try postScroll(
+                    at: point,
+                    deltaX: request.deltaX ?? 0,
+                    deltaY: request.deltaY ?? 0
+                )
             case "up":
                 let button = activeButton ?? request.button ?? "left"
                 try postPointer(type: try mouseTypes(button).up, at: point, button: button)
@@ -114,6 +125,50 @@ enum InputService {
         if let activeButton, let lastPoint {
             try postPointer(type: try mouseTypes(activeButton).up, at: lastPoint, button: activeButton)
         }
+    }
+
+    static func control(
+        target: ResolvedTarget,
+        request: PointerControlRequest,
+        state initialState: PointerControlState
+    ) async throws -> PointerControlState {
+        var state = initialState
+        let point = point(target: target, x: request.x, y: request.y)
+        switch request.type {
+        case "click":
+            try await activate(target)
+            try postClick(
+                at: point,
+                button: request.button ?? "left",
+                clickCount: min(max(request.clickCount ?? 1, 1), 2)
+            )
+        case "down":
+            try await activate(target)
+            let button = request.button ?? "left"
+            if let activeButton = state.activeButton, let lastPoint = state.lastPoint {
+                try postPointer(type: try mouseTypes(activeButton).up, at: lastPoint, button: activeButton)
+            }
+            try postPointer(type: try mouseTypes(button).down, at: point, button: button)
+            state.activeButton = button
+        case "move":
+            let button = state.activeButton ?? "left"
+            let eventType = try state.activeButton.map { try mouseTypes($0).dragged } ?? .mouseMoved
+            try postPointer(type: eventType, at: point, button: button)
+        case "scroll":
+            try postScroll(
+                at: point,
+                deltaX: request.deltaX ?? 0,
+                deltaY: request.deltaY ?? 0
+            )
+        case "up":
+            let button = state.activeButton ?? request.button ?? "left"
+            try postPointer(type: try mouseTypes(button).up, at: point, button: button)
+            state.activeButton = nil
+        default:
+            throw HostError.invalidArguments("Unsupported input control: \(request.type)")
+        }
+        state.lastPoint = point
+        return state
     }
 
     private static func point(target: ResolvedTarget, x: Double, y: Double) -> CGPoint {
@@ -143,7 +198,7 @@ enum InputService {
         FileHandle.standardOutput.write(Data("\n".utf8))
     }
 
-    private static func focusedElementIsEditable(_ target: ResolvedTarget) -> Bool {
+    static func focusedElementIsEditable(_ target: ResolvedTarget) -> Bool {
         guard let processID = target.processID else { return false }
         let applicationElement = AXUIElementCreateApplication(processID)
         var rawFocusedElement: CFTypeRef?
